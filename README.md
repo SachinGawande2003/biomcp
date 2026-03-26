@@ -5,12 +5,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
+[![Tools: 27](https://img.shields.io/badge/Tools-27-blue.svg)](#tools-27-total)
 [![Databases: 15+](https://img.shields.io/badge/Databases-15+-purple.svg)](#databases)
 
 **The most comprehensive Model Context Protocol server for life sciences.**  
-Connect Claude to every major biological database — no API wrappers, no copy-pasting, just science.
+Connect Claude to every major biological database and state-of-the-art AI models — no API wrappers, no copy-pasting, just science.
 
-[🚀 Quick Start](#quick-start) • [🔧 Tools](#tools-23-total) • [📊 Databases](#databases) • [💡 Examples](#usage-examples) • [🤝 Contributing](#contributing)
+[🚀 Quick Start](#quick-start) • [🔧 Tools](#tools-27-total) • [📊 Databases](#databases) • [💡 Examples](#usage-examples) • [🤝 Contributing](#contributing)
 
 </div>
 
@@ -18,7 +19,7 @@ Connect Claude to every major biological database — no API wrappers, no copy-p
 
 ## What is BioMCP?
 
-BioMCP bridges Claude and the world's life sciences databases through the [Model Context Protocol](https://modelcontextprotocol.io). Ask Claude to **search PubMed**, **predict protein structure**, **find drug targets**, **query clinical trials**, **analyze single-cell data**, or **generate research hypotheses** — all in natural language, all in real time.
+BioMCP bridges Claude and the world's life sciences databases through the [Model Context Protocol](https://modelcontextprotocol.io). Ask Claude to **search PubMed**, **predict protein structure** with AI, **generate DNA sequences**, **find drug targets**, **query clinical trials**, **analyze single-cell data**, or **generate research hypotheses** — all in natural language, all in real time.
 
 ```
 You → "What drugs target EGFR and what clinical trials are recruiting?"
@@ -27,7 +28,7 @@ Claude + BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Struc
 
 ---
 
-## Tools (23 total)
+## Tools (27 total)
 
 ### 📚 Literature & NCBI
 | Tool | Description |
@@ -71,6 +72,14 @@ Claude + BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Struc
 | `search_clinical_trials` | ClinicalTrials.gov: trials with status, phase, interventions, eligibility |
 | `get_trial_details` | Full trial protocol: arms, outcomes, contacts |
 
+### 🤖 AI-Powered (NVIDIA NIM)
+| Tool | Description |
+|------|-------------|
+| `predict_structure_boltz2` | MIT Boltz-2: Protein/DNA/RNA/ligand structure prediction + binding affinity (FEP accuracy, 1000x faster) |
+| `generate_dna_evo2` | Arc Evo2-40B: Generate DNA sequences with 40B parameter genomic foundation model |
+| `score_sequence_evo2` | Compare wildtype vs variant DNA sequences for variant effect prediction |
+| `design_protein_ligand` | Full drug-discovery pipeline: UniProt → Boltz-2 structure + affinity in one call |
+
 ### 🌐 Integrated & Advanced
 | Tool | Description |
 |------|-------------|
@@ -80,10 +89,11 @@ Claude + BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Struc
 
 ---
 
-## Databases
+## Databases & AI Models
 
-| Database | Domain | URL |
-|----------|--------|-----|
+| Source | Domain | URL |
+|--------|--------|-----|
+| **Traditional Databases** |
 | NCBI PubMed | Literature | https://pubmed.ncbi.nlm.nih.gov |
 | NCBI Gene | Genomics | https://www.ncbi.nlm.nih.gov/gene |
 | NCBI BLAST | Sequence Alignment | https://blast.ncbi.nlm.nih.gov |
@@ -100,6 +110,9 @@ Claude + BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Struc
 | Human Cell Atlas | Single-Cell | https://data.humancellatlas.org |
 | OpenNeuro | Neuroimaging | https://openneuro.org |
 | NeuroVault | Neuroimaging | https://neurovault.org |
+| **AI Models (NVIDIA NIM)** |
+| MIT Boltz-2 | Structure Prediction | https://build.nvidia.com/mit/boltz2 |
+| Arc Evo2-40B | DNA Generation | https://build.nvidia.com/arc/evo2-40b |
 
 ---
 
@@ -108,12 +121,14 @@ Claude + BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Struc
 ### Prerequisites
 - Python 3.11+
 - Claude Desktop or any MCP-compatible client
+- (Optional) NCBI API key for higher rate limits
+- (Optional) NVIDIA API keys for AI tools
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/biomcp/biomcp.git
+git clone https://github.com/SachinGawande2003/biomcp.git
 cd biomcp
 
 # Install (standard)
@@ -121,6 +136,9 @@ pip install -e .
 
 # Install with neuroimaging support
 pip install -e ".[neuroimaging]"
+
+# Install with dev dependencies
+pip install -e ".[dev]"
 ```
 
 ### Configure Claude Desktop
@@ -144,6 +162,8 @@ Add to your `claude_desktop_config.json`:
 ```
 
 > **💡 Tip**: Get a free [NCBI API key](https://www.ncbi.nlm.nih.gov/account/) to increase rate limits from 3 to 10 requests/second.
+>
+> **🚀 New**: Get free NVIDIA API keys for AI tools at [build.nvidia.com/mit/boltz2](https://build.nvidia.com/mit/boltz2) and [build.nvidia.com/arc/evo2-40b](https://build.nvidia.com/arc/evo2-40b).
 
 ### Restart Claude Desktop and test:
 
@@ -152,6 +172,8 @@ Add to your `claude_desktop_config.json`:
 "Get the AlphaFold structure for TP53 and tell me about the confidence scores"
 "What drugs are approved that target EGFR?"
 "Generate a multi-omics report for KRAS"
+"Predict the structure of EGFR with ligand CC1=CC=CC=C1 and compute binding affinity"
+"Generate a DNA sequence starting with ATGGCG..."
 ```
 
 ---
@@ -176,6 +198,20 @@ Add to your `claude_desktop_config.json`:
 "What are the top ChEMBL compounds targeting KRAS G12C mutation?"
 "Get compound info for imatinib (CHEMBL941)"
 "Show me gene-disease associations for BRCA1 with evidence scores"
+```
+
+### AI-Powered Structure Prediction
+```
+"Predict the 3D structure of insulin (sequence: ...) with ligand CCO"
+"Compute binding affinity between EGFR and gefitinib (SMILES: ...)"
+"Get structure prediction for a protein-protein complex"
+```
+
+### AI-Powered DNA Generation
+```
+"Generate a 200bp promoter sequence starting with ATG"
+"Compare wildtype vs variant DNA sequence for TP53 mutation"
+"Generate regulatory element for gene expression"
 ```
 
 ### Multi-Omics Report (Flagship)
@@ -216,8 +252,9 @@ biomcp/
 │   │   ├── ncbi.py        # PubMed, Gene, BLAST
 │   │   ├── proteins.py    # UniProt, AlphaFold, PDB
 │   │   ├── pathways.py    # KEGG, Reactome, ChEMBL, Open Targets
-│   │   └── advanced.py    # ClinicalTrials, GEO, scRNA, Ensembl,
-│   │                      # Multi-Omics, Neuroimaging, Hypothesis
+│   │   ├── advanced.py    # ClinicalTrials, GEO, scRNA, Ensembl,
+│   │   │                  # Multi-Omics, Neuroimaging, Hypothesis
+│   │   └── nvidia_nim.py  # Boltz-2, Evo2-40B AI models
 │   └── utils/
 │       └── __init__.py    # Rate limiter, cache, validators, HTTP client
 ├── tests/
@@ -239,13 +276,20 @@ biomcp/
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NCBI_API_KEY` | NCBI API key (increases rate limit to 10/s) | None (3/s) |
+| `NVIDIA_BOLTZ2_API_KEY` | NVIDIA API key for Boltz-2 structure prediction | None |
+| `NVIDIA_EVO2_API_KEY` | NVIDIA API key for Evo2-40B DNA generation | None |
 | `BIOMCP_LOG_LEVEL` | Log level: DEBUG/INFO/WARNING/ERROR | INFO |
+
+Get free API keys:
+- **NCBI**: https://www.ncbi.nlm.nih.gov/account/
+- **NVIDIA Boltz-2**: https://build.nvidia.com/mit/boltz2
+- **NVIDIA Evo2-40B**: https://build.nvidia.com/arc/evo2-40b
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Whether you're adding a new database, fixing a bug, or improving documentation.
+Contributions are welcome! Whether it's adding a new database, fixing a bug, improving documentation, or integrating new AI models.
 
 ```bash
 # Development setup
@@ -275,9 +319,9 @@ If you use BioMCP in your research, please cite:
 
 ```bibtex
 @software{biomcp2025,
-  title   = {BioMCP: A Comprehensive MCP Server for Bioinformatics and Life Sciences},
+  title   = {BioMCP: A Comprehensive MCP Server for Bioinformatics, AI Models, and Life Sciences},
   year    = {2025},
-  url     = {https://github.com/biomcp/biomcp},
+  url     = {https://github.com/SachinGawande2003/biomcp},
   license = {MIT}
 }
 ```
