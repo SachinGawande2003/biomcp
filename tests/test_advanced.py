@@ -1,6 +1,6 @@
 """
 Tests — Advanced Tools (Mocked HTTP)
-======================================
+=====================================
 Unit tests for ClinicalTrials.gov, GEO, Ensembl, scRNA-seq, neuroimaging.
 """
 
@@ -13,18 +13,21 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_search_clinical_trials_parses_response(mock_http_client, mock_http_response):
-    """search_clinical_trials should parse ClinicalTrials.gov v2 JSON."""
     ct_resp = mock_http_response(json_data={
         "totalCount": 1,
         "studies": [{
             "protocolSection": {
                 "identificationModule": {"nctId": "NCT04280705", "briefTitle": "KRAS Lung Trial"},
-                "statusModule": {"overallStatus": "RECRUITING",
-                                 "startDateStruct": {"date": "2024-01-01"},
-                                 "primaryCompletionDateStruct": {"date": "2026-12-31"}},
+                "statusModule": {
+                    "overallStatus": "RECRUITING",
+                    "startDateStruct": {"date": "2024-01-01"},
+                    "primaryCompletionDateStruct": {"date": "2026-12-31"},
+                },
                 "descriptionModule": {"briefSummary": "Phase 2 study of KRAS inhibitor."},
-                "designModule": {"phases": ["PHASE2"], "studyType": "INTERVENTIONAL",
-                                 "enrollmentInfo": {"count": 120}},
+                "designModule": {
+                    "phases": ["PHASE2"], "studyType": "INTERVENTIONAL",
+                    "enrollmentInfo": {"count": 120},
+                },
                 "conditionsModule": {"conditions": ["Non-Small Cell Lung Cancer"]},
                 "armsInterventionsModule": {
                     "interventions": [{"interventionName": "KRASi-001", "interventionType": "DRUG"}]
@@ -33,7 +36,7 @@ async def test_search_clinical_trials_parses_response(mock_http_client, mock_htt
                 "contactsLocationsModule": {"locations": [{"city": "Boston", "country": "United States"}]},
                 "sponsorCollaboratorsModule": {"leadSponsor": {"name": "NIH"}},
             }
-        }]
+        }],
     })
 
     mock_http_client.get = AsyncMock(return_value=ct_resp)
@@ -44,7 +47,7 @@ async def test_search_clinical_trials_parses_response(mock_http_client, mock_htt
             "KRAS lung cancer", max_results=5
         )
 
-    assert result["total_found"] == 1
+    assert result["total_found"] == 1   # FIX: was result["total"]
     assert result["studies"][0]["nct_id"] == "NCT04280705"
     assert result["studies"][0]["status"] == "RECRUITING"
     assert "KRAS" in result["studies"][0]["title"]
@@ -52,7 +55,6 @@ async def test_search_clinical_trials_parses_response(mock_http_client, mock_htt
 
 @pytest.mark.asyncio
 async def test_get_trial_details_not_found(mock_http_client, mock_http_response):
-    """get_trial_details should handle 404 gracefully."""
     not_found = mock_http_response(status_code=404)
     not_found.raise_for_status = lambda: None
     mock_http_client.get = AsyncMock(return_value=not_found)
@@ -64,10 +66,8 @@ async def test_get_trial_details_not_found(mock_http_client, mock_http_response)
     assert "error" in result
 
 
-
 @pytest.mark.asyncio
 async def test_search_gene_expression_empty(mock_http_client, mock_http_response):
-    """search_gene_expression should handle empty GEO results."""
     empty_resp = mock_http_response(
         json_data={"esearchresult": {"idlist": [], "count": "0"}}
     )
@@ -78,12 +78,11 @@ async def test_search_gene_expression_empty(mock_http_client, mock_http_response
         result = await search_gene_expression.__wrapped__.__wrapped__.__wrapped__("FAKEGENE123")
 
     assert result["datasets"] == []
-    assert result["total"] == 0
+    assert result["total_found"] == 0   # FIX: was result["total"]
 
 
 @pytest.mark.asyncio
 async def test_get_gene_variants_not_found(mock_http_client, mock_http_response):
-    """get_gene_variants should handle missing gene in Ensembl gracefully."""
     empty_lookup = mock_http_response(json_data=[])
     mock_http_client.get = AsyncMock(return_value=empty_lookup)
 
@@ -96,17 +95,15 @@ async def test_get_gene_variants_not_found(mock_http_client, mock_http_response)
 
 
 @pytest.mark.asyncio
-async def test_query_neuroimaging_openneuro_failure(mock_http_client, mock_http_response):
-    """Neuroimaging search should handle OpenNeuro/NeuroVault failures gracefully."""
-    error_resp = mock_http_response(status_code=500)
+async def test_query_neuroimaging_handles_failure_gracefully(mock_http_client, mock_http_response):
     mock_http_client.post = AsyncMock(side_effect=Exception("Connection error"))
-    mock_http_client.get = AsyncMock(side_effect=Exception("Connection error"))
+    mock_http_client.get  = AsyncMock(side_effect=Exception("Connection error"))
 
     with patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client):
         from biomcp.tools.advanced import query_neuroimaging_datasets
         result = await query_neuroimaging_datasets("hippocampus")
 
-    assert result["total_datasets"] == 0
+    assert result["total_found"] == 0
     assert result["datasets"] == []
     assert "recommended_tools" in result
 
