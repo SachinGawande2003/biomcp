@@ -36,6 +36,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # pycache in src
 src/**/__pycache__/
