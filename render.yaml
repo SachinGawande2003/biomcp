@@ -2,14 +2,14 @@ services:
   - type: web
     name: heuris-biomcp
     env: python
-    buildCommand: pip install -e .
-    startCommand: BIOMCP_TRANSPORT=http BIOMCP_HTTP_PORT=10000 biomcp
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m biomcp.server
     envVars:
       - key: BIOMCP_TRANSPORT
         value: http
       - key: BIOMCP_HTTP_PORT
         value: 10000
       - key: BIOMCP_LOG_LEVEL
-        value: INFO
+        value: DEBUG
       - key: PYTHON_VERSION
         value: "3.11"
