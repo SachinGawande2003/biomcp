@@ -5,15 +5,42 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
-[![Tools: 42](https://img.shields.io/badge/Tools-42-blue.svg)](#tools-42-total)
+[![Tools: 52](https://img.shields.io/badge/Tools-52-blue.svg)](#tools-52-total)
 [![Databases: 20+](https://img.shields.io/badge/Databases-20+-purple.svg)](#databases--ai-models)
+[![Live Demo](https://img.shields.io/badge/Live-Demo-brightgreen)](https://heuris-biomcp.onrender.com)
 
 **The most comprehensive Model Context Protocol server for life sciences v2.**  
 Connect Claude to every major biological database and state-of-the-art AI models — no API wrappers, no copy-pasting, just science.
 
-[🚀 Quick Start](#quick-start) • [🔧 Tools](#tools-47-total) • [📊 Databases](#databases--ai-models) • [💡 Examples](#usage-examples) • [🤝 Contributing](#contributing)
+[🚀 Quick Start](#quick-start) • [🔧 Tools](#tools-52-total) • [📊 Databases](#databases--ai-models) • [💡 Examples](#usage-examples) • [🤝 Contributing](#contributing)
 
 </div>
+
+---
+
+## Live Demo
+
+Try BioMCP without installing — connect to our live server:
+
+```
+https://heuris-biomcp.onrender.com/sse
+```
+
+### Connect to Live Server
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "biomcp": {
+      "url": "https://heuris-biomcp.onrender.com/sse"
+    }
+  }
+}
+```
+
+> **Note**: The live demo supports all features. For local development or custom deployments, see [Local Installation](#installation).
 
 ---
 
@@ -172,13 +199,42 @@ Claude + BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Struc
 
 ## Quick Start
 
-### Prerequisites
+### Option 1: Use Live Demo (No Installation)
+
+Add to your Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "biomcp": {
+      "url": "https://heuris-biomcp.onrender.com/sse"
+    }
+  }
+}
+```
+
+### Option 2: Deploy Your Own
+
+Deploy to Render with one click:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SachinGawande2003/BioMCP)
+
+Or manually:
+1. Fork this repository
+2. Create a new Web Service on [Render](https://render.com)
+3. Connect your fork
+4. Set build command: `pip install -r requirements.txt && pip install -e .`
+5. Set start command: `BIOMCP_TRANSPORT=http BIOMCP_HTTP_PORT=$PORT python -m biomcp`
+
+### Option 3: Local Installation
+
+#### Prerequisites
 - Python 3.11+
 - Claude Desktop or any MCP-compatible client
 - (Optional) NCBI API key for higher rate limits
 - (Optional) NVIDIA API keys for AI tools
 
-### Installation
+#### Installation
 
 ```bash
 # Clone the repository
@@ -195,12 +251,9 @@ pip install -e ".[neuroimaging]"
 pip install -e ".[dev]"
 ```
 
-### Configure Claude Desktop
+#### Configure Claude Desktop
 
-Add to your `claude_desktop_config.json`:
-
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`  
-**Windows**: `%APPDATA%/Claude/claude_desktop_config.json`
+**For Local STDIO Mode (default):**
 
 ```json
 {
@@ -210,6 +263,18 @@ Add to your `claude_desktop_config.json`:
       "env": {
         "NCBI_API_KEY": "your_ncbi_api_key_here"
       }
+    }
+  }
+}
+```
+
+**For Remote HTTP Mode (using live demo or your own deployed server):**
+
+```json
+{
+  "mcpServers": {
+    "biomcp": {
+      "url": "https://heuris-biomcp.onrender.com/sse"
     }
   }
 }
