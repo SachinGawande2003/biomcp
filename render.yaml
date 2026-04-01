@@ -2,7 +2,7 @@ services:
   - type: web
     name: heuris-biomcp
     env: python
-    buildCommand: poetry install
+    buildCommand: pip install -e .
     startCommand: biomcp
     envVars:
       - key: BIOMCP_TRANSPORT
