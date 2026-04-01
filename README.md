@@ -44,6 +44,22 @@ Add to your `claude_desktop_config.json`:
 
 ---
 
+## See BioMCP in Action
+
+![BioMCP Demo](assets/biomcp-demo.gif)
+
+### Quick Demo Video
+
+Watch how to connect BioMCP to Claude Desktop:
+
+<a href="https://www.youtube.com/watch?v=YOUR_VIDEO_ID">
+  <img src="assets/youtube-thumbnail.png" alt="Watch Demo" width="400"/>
+</a>
+
+> **Tip**: Coming soon - video walkthrough of connecting BioMCP and running your first query!
+
+---
+
 ## What is BioMCP?
 
 BioMCP bridges Claude and the world's life sciences databases through the [Model Context Protocol](https://modelcontextprotocol.io). Ask Claude to **search PubMed**, **predict protein structure** with AI, **generate DNA sequences**, **find drug targets**, **query clinical trials**, **analyze single-cell data**, **verify biological claims**, or **generate research hypotheses** — all in natural language, all in real time.
