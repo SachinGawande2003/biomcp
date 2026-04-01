@@ -1207,8 +1207,17 @@ def create_server() -> Server:
     import os
 
     logo_path = os.path.join(os.path.dirname(__file__), "..", "..", "LOGO.jpeg")
+
+    # Try multiple paths for deployment compatibility
+    if not os.path.exists(logo_path):
+        logo_path = os.path.join(os.path.dirname(__file__), "LOGO.jpeg")
+    if not os.path.exists(logo_path):
+        logo_path = "LOGO.jpeg"
+    if not os.path.exists(logo_path):
+        logo_path = os.environ.get("BIOMCP_ICON_PATH", "")
+
     icon_data = None
-    if os.path.exists(logo_path):
+    if logo_path and os.path.exists(logo_path):
         import base64
 
         with open(logo_path, "rb") as f:
@@ -1219,6 +1228,18 @@ def create_server() -> Server:
                     sizes=["48x48", "96x96", "128x128"],
                 )
             ]
+    else:
+        # Fallback: use inline SVG placeholder icon
+        import base64
+
+        svg_icon = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#2563eb"/><text x="50" y="60" text-anchor="middle" font-size="40" fill="white" font-family="Arial">🧬</text></svg>"""
+        icon_data = [
+            Icon(
+                src=f"data:image/svg+xml;base64,{base64.b64encode(svg_icon.encode()).decode()}",
+                mimeType="image/svg+xml",
+                sizes=["48x48", "96x96", "128x128"],
+            )
+        ]
 
     server = Server(
         "heuris-biomcp",
