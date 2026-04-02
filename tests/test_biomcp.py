@@ -244,8 +244,8 @@ class TestServer:
         names = {t.name for t in TOOLS}
         assert "predict_structure_boltz2" in names
         assert "generate_dna_evo2" in names
-        assert "score_sequence_evo2" in names
-        assert "design_protein_ligand" in names
+        assert "score_sequence_evo2" not in names
+        assert "design_protein_ligand" not in names
 
     @pytest.mark.asyncio
     async def test_dispatch_unknown_tool_returns_error(self):

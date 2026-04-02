@@ -12,4 +12,5 @@ __all__ = [
     "crispr_tools",
     "drug_safety",
     "variant_interpreter",
+    "strategy_surface",
 ]

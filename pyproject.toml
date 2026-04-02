@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "biomcp"
-version = "1.0.0"
-description = "BioMCP — The most comprehensive MCP server for bioinformatics, drug discovery, AI-powered structure prediction, neuroimaging & multi-omics."
+version = "2.3.0"
+description = "Heuris-BioMCP — strategic MCP server for bioinformatics, translational research, structure prediction, CRISPR, variant interpretation, and clinical workflows."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ authors = [
 keywords = [
     "mcp", "bioinformatics", "claude", "anthropic", "genomics", "proteomics",
     "drug-discovery", "alphafold", "ncbi", "pubmed", "uniprot", "kegg",
-    "single-cell", "rna-seq", "neuroimaging", "multi-omics",
+    "single-cell", "rna-seq", "multi-omics", "crispr", "variant-interpretation",
     "model-context-protocol", "boltz2", "evo2", "nvidia-nim"
 ]
 classifiers = [
@@ -72,11 +72,11 @@ dev = [
 biomcp = "biomcp.server:main"
 
 [project.urls]
-Homepage      = "https://github.com/SachinGawande2003/biomcp"
-Documentation = "https://github.com/SachinGawande2003/biomcp#readme"
-Repository    = "https://github.com/SachinGawande2003/biomcp"
-"Bug Tracker" = "https://github.com/SachinGawande2003/biomcp/issues"
-Changelog     = "https://github.com/SachinGawande2003/biomcp/releases"
+Homepage      = "https://github.com/SachinGawande2003/Heuris-BioMCP"
+Documentation = "https://github.com/SachinGawande2003/Heuris-BioMCP#readme"
+Repository    = "https://github.com/SachinGawande2003/Heuris-BioMCP"
+"Bug Tracker" = "https://github.com/SachinGawande2003/Heuris-BioMCP/issues"
+Changelog     = "https://github.com/SachinGawande2003/Heuris-BioMCP/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/biomcp"]

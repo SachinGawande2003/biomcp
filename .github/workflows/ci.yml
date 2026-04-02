@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, master, develop]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   test:
@@ -43,7 +43,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     needs: test
 
     steps:

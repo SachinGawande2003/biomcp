@@ -1,10 +1,8 @@
 """
-BioMCP v2 — Complete MCP Server  [FIXED v2.2]
-================================
-Fixes applied:
-  - Removed duplicate `from biomcp.utils import ...` at module top (Bug #1)
-  - Removed 3 sets of duplicate imports inside `_raw_dispatch()` (Bug #2)
-  - Hardened `create_server()` against missing mcp.types.Icon (Bug #10)
+Heuris-BioMCP strategic MCP server.
+
+This server exposes the curated public MCP surface while retaining lower-level
+legacy handlers internally for planner and composition workflows.
 """
 
 from __future__ import annotations
@@ -20,8 +18,55 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from biomcp import __version__
 from biomcp.utils import close_http_client, format_error, format_success
 # FIX #1: Removed duplicate import line that was here
+
+SERVER_NAME = "heuris-biomcp"
+SERVER_DISPLAY_NAME = "Heuris-BioMCP"
+SSE_PATH = "/sse"
+MESSAGE_PATH = "/messages/"
+
+CAPABILITY_CONFIG: dict[str, dict[str, Any]] = {
+    "core_server": {
+        "env_any": [],
+        "healthy_detail": "Core MCP server, tool registry, and shared HTTP infrastructure are available.",
+        "degraded_detail": "Core MCP server is unavailable.",
+        "tools": [],
+        "required_env": [],
+    },
+    "ncbi_enhanced": {
+        "env_any": ["NCBI_API_KEY"],
+        "healthy_detail": "NCBI API key configured for elevated rate limits.",
+        "degraded_detail": "NCBI tools work without a key, but rate limits are reduced to 3 requests/second.",
+        "tools": [
+            "search_pubmed",
+            "get_gene_info",
+            "run_blast",
+            "search_gene_expression",
+            "get_omim_gene_diseases",
+        ],
+        "required_env": ["NCBI_API_KEY"],
+    },
+    "nvidia_boltz2": {
+        "env_any": ["NVIDIA_BOLTZ2_API_KEY", "NVIDIA_NIM_API_KEY"],
+        "healthy_detail": "Boltz-2 credentials configured.",
+        "degraded_detail": (
+            "Boltz-2 tools are unavailable until NVIDIA_BOLTZ2_API_KEY or NVIDIA_NIM_API_KEY is set."
+        ),
+        "tools": ["predict_structure_boltz2"],
+        "required_env": ["NVIDIA_BOLTZ2_API_KEY", "NVIDIA_NIM_API_KEY"],
+    },
+    "nvidia_evo2": {
+        "env_any": ["NVIDIA_EVO2_API_KEY", "NVIDIA_NIM_API_KEY"],
+        "healthy_detail": "Evo2 credentials configured.",
+        "degraded_detail": (
+            "Evo2 tools are unavailable until NVIDIA_EVO2_API_KEY or NVIDIA_NIM_API_KEY is set."
+        ),
+        "tools": ["generate_dna_evo2"],
+        "required_env": ["NVIDIA_EVO2_API_KEY", "NVIDIA_NIM_API_KEY"],
+    },
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,6 +113,87 @@ def _enum_prop(desc: str, values: list[str], default: str | None = None) -> dict
     if default is not None:
         p["default"] = default
     return p
+
+
+def _array_prop(desc: str, item_type: str = "string") -> dict:
+    return {"type": "array", "description": desc, "items": {"type": item_type}}
+
+
+def _obj_prop(desc: str) -> dict:
+    return {
+        "type": "object",
+        "description": desc,
+        "additionalProperties": {"type": "number"},
+    }
+
+
+def _tool_names() -> list[str]:
+    return [tool.name for tool in TOOLS]
+
+
+def _build_capability_status() -> dict[str, dict[str, Any]]:
+    tool_names = set(_tool_names())
+    capabilities: dict[str, dict[str, Any]] = {}
+    for name, config in CAPABILITY_CONFIG.items():
+        env_any = config["env_any"]
+        is_healthy = True if not env_any else any(os.getenv(var) for var in env_any)
+        capabilities[name] = {
+            "status": "healthy" if is_healthy else "degraded",
+            "detail": config["healthy_detail"] if is_healthy else config["degraded_detail"],
+            "required_env": config["required_env"],
+            "tools": [tool for tool in config["tools"] if tool in tool_names],
+        }
+    return capabilities
+
+
+def _build_health_report(transport_mode: str | None = None) -> dict[str, Any]:
+    mode = transport_mode or os.getenv("BIOMCP_TRANSPORT", "stdio")
+    capabilities = _build_capability_status()
+    degraded = [name for name, cfg in capabilities.items() if cfg["status"] != "healthy"]
+    return {
+        "service": SERVER_NAME,
+        "display_name": SERVER_DISPLAY_NAME,
+        "version": __version__,
+        "status": "degraded" if degraded else "healthy",
+        "tool_count": len(TOOLS),
+        "transport": {
+            "mode": mode,
+            "sse_path": SSE_PATH if mode == "http" else None,
+            "message_path": MESSAGE_PATH if mode == "http" else None,
+        },
+        "capabilities": capabilities,
+        "degraded_capabilities": degraded,
+    }
+
+
+def _build_readiness_report(transport_mode: str | None = None) -> dict[str, Any]:
+    mode = transport_mode or os.getenv("BIOMCP_TRANSPORT", "stdio")
+    return {
+        "service": SERVER_NAME,
+        "version": __version__,
+        "ready": bool(TOOLS),
+        "transport_mode": mode,
+        "tool_count": len(TOOLS),
+    }
+
+
+def _build_tool_health_report() -> dict[str, Any]:
+    tool_names = _tool_names()
+    capabilities = _build_capability_status()
+    gated_capabilities = {
+        name: cfg
+        for name, cfg in capabilities.items()
+        if cfg["tools"] and cfg["status"] != "healthy"
+    }
+    return {
+        "service": SERVER_NAME,
+        "version": __version__,
+        "registered_tools": tool_names,
+        "registered_tool_count": len(tool_names),
+        "gated_capabilities": gated_capabilities,
+        "ungated_tool_count": len(tool_names)
+        - sum(len(cfg["tools"]) for cfg in gated_capabilities.values()),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -888,6 +1014,258 @@ TOOLS: list[Tool] = [
     ),
 ]
 
+_LEGACY_TOOLS_BY_NAME = {tool.name: tool for tool in TOOLS}
+
+
+def _legacy_tool(name: str) -> Tool:
+    return _LEGACY_TOOLS_BY_NAME[name]
+
+
+TOOLS = [
+    _legacy_tool("search_pubmed"),
+    _legacy_tool("get_gene_info"),
+    _legacy_tool("run_blast"),
+    _legacy_tool("get_protein_info"),
+    _tool(
+        "find_protein",
+        "Unified protein discovery across UniProt and PDB. Use accession for a direct record lookup or query to search reviewed proteins and experimental structures.",
+        {
+            "query": _str_prop("Protein, gene, family, or free-text search query."),
+            "source": _enum_prop("Which source to search.", ["auto", "both", "uniprot", "pdb"], "auto"),
+            "accession": _str_prop("Optional UniProt accession for direct lookup."),
+            "organism": _str_prop("Organism filter for UniProt search. Default 'homo sapiens'."),
+            "reviewed_only": _bool_prop("Limit UniProt search to reviewed Swiss-Prot entries.", True),
+            "max_results": _int_prop("Maximum results per source.", 10, 1, 25),
+        },
+        [],
+    ),
+    _legacy_tool("get_alphafold_structure"),
+    _tool(
+        "pathway_analysis",
+        "Merged pathway workflow. Search KEGG, retrieve genes for a pathway, or assemble Reactome plus KEGG context for a gene.",
+        {
+            "action": _enum_prop("Workflow step.", ["auto", "search", "gene_context", "genes"], "auto"),
+            "db": _enum_prop("Preferred pathway database.", ["auto", "kegg", "reactome"], "auto"),
+            "query": _str_prop("Free-text pathway search term."),
+            "gene_symbol": _str_prop("Gene symbol for Reactome or KEGG context."),
+            "pathway_id": _str_prop("KEGG pathway identifier such as 'hsa05200'."),
+            "organism": _str_prop("KEGG organism code. Default 'hsa'."),
+        },
+        [],
+    ),
+    _legacy_tool("get_drug_targets"),
+    _legacy_tool("get_gene_disease_associations"),
+    _legacy_tool("search_clinical_trials"),
+    _legacy_tool("multi_omics_gene_report"),
+    _tool(
+        "predict_structure_boltz2",
+        "Boltz-2 structure workflow. Use mode='structure' for direct multimolecular structure prediction or mode='protein_ligand' for the integrated UniProt-to-docking workflow.",
+        {
+            "mode": _enum_prop("Boltz-2 workflow mode.", ["structure", "protein_ligand"], "structure"),
+            "protein_sequences": _array_prop("Protein sequences for direct Boltz-2 prediction."),
+            "ligand_smiles": _array_prop("Ligand SMILES strings."),
+            "dna_sequences": _array_prop("Optional DNA sequences for complex prediction."),
+            "rna_sequences": _array_prop("Optional RNA sequences for complex prediction."),
+            "uniprot_accession": _str_prop("UniProt accession used when mode='protein_ligand'."),
+            "predict_affinity": _bool_prop("Predict ligand binding affinity when ligands are present.", False),
+            "method_conditioning": _enum_prop("Optional structure-style conditioning.", ["x-ray", "nmr", "md"], "x-ray"),
+            "pocket_residues": {
+                "type": "array",
+                "description": "Optional binding-pocket residue constraints.",
+                "items": {"type": "object"},
+            },
+            "recycling_steps": _int_prop("Boltz-2 recycling iterations.", 3, 1, 10),
+            "sampling_steps": _int_prop("Diffusion sampling steps.", 200, 50, 500),
+            "diffusion_samples": _int_prop("Number of structural hypotheses.", 1, 1, 5),
+        },
+        [],
+    ),
+    _tool(
+        "generate_dna_evo2",
+        "Evo2 DNA workflow. Use mode='generate' for sequence generation or mode='score' for wildtype-versus-variant scoring.",
+        {
+            "mode": _enum_prop("Evo2 workflow mode.", ["generate", "score"], "generate"),
+            "sequence": _str_prop("Seed DNA sequence for generation."),
+            "num_tokens": _int_prop("Number of DNA tokens to generate.", 200, 1, 1200),
+            "temperature": _float_prop("Sampling temperature.", 1.0),
+            "top_k": _int_prop("Top-K sampling parameter.", 4, 0, 6),
+            "top_p": _float_prop("Top-P sampling parameter.", 1.0),
+            "enable_logits": _bool_prop("Return per-token logits for generation.", False),
+            "num_generations": _int_prop("Independent generation runs.", 1, 1, 5),
+            "wildtype_sequence": _str_prop("Reference DNA sequence used when mode='score'."),
+            "variant_sequence": _str_prop("Variant DNA sequence used when mode='score'."),
+        },
+        [],
+    ),
+    _tool(
+        "crispr_analysis",
+        "Merged CRISPR workflow covering guide design, guide scoring, off-target review, base editing, and repair outcome estimation.",
+        {
+            "action": _enum_prop("CRISPR workflow step.", ["design", "score", "off_target", "base_edit", "repair"], "design"),
+            "gene_symbol": _str_prop("Target gene symbol."),
+            "guide_sequence": _str_prop("Guide sequence for scoring, off-target review, or repair analysis."),
+            "target_mutation": _str_prop("Desired mutation for base-edit design."),
+            "repair_template": _str_prop("Optional HDR repair template."),
+            "cas_variant": _enum_prop("CRISPR nuclease.", ["SpCas9", "SaCas9", "Cas12a", "CjCas9"], "SpCas9"),
+            "target_region": _str_prop("Guide search region, such as 'early_exons' or 'all_coding'."),
+            "n_guides": _int_prop("Number of guides to return.", 5, 1, 20),
+            "min_score": _float_prop("Minimum guide score for design.", 40.0),
+            "mismatches": _int_prop("Maximum mismatches for off-target review.", 3, 1, 5),
+            "genome": _enum_prop("Genome assembly used for off-target review.", ["hg38", "hg19"], "hg38"),
+            "cell_line": _str_prop("Cell-line context for repair estimates."),
+            "use_blast": _bool_prop("Use BLAST to supplement off-target review.", False),
+        },
+        ["action"],
+    ),
+    _tool(
+        "drug_safety",
+        "Merged FDA drug-safety workflow for adverse-event search, signal detection, label review, and head-to-head comparison.",
+        {
+            "action": _enum_prop("Drug-safety workflow step.", ["events", "signals", "label", "compare"], "events"),
+            "drug_name": _str_prop("Generic or brand drug name."),
+            "comparator_drug": _str_prop("Comparator drug used when action='compare'."),
+            "event_type": _enum_prop("Safety category filter.", ["all", "cardiac", "hepatic", "hematologic", "neurological", "renal", "hypersensitivity", "respiratory", "oncology"], "all"),
+            "serious_only": _bool_prop("Restrict adverse-event search to serious reports.", False),
+            "event_terms": _array_prop("Optional adverse-event terms for signal detection."),
+            "max_results": _int_prop("Maximum reports to summarize.", 50, 1, 100),
+            "patient_sex": _enum_prop("Patient sex filter.", ["", "male", "female"], ""),
+            "age_group": _enum_prop("Age filter.", ["", "pediatric", "adult", "elderly"], ""),
+        },
+        ["action", "drug_name"],
+    ),
+    _tool(
+        "variant_analysis",
+        "Merged variant-interpretation workflow for ACMG classification, population frequency, ClinVar review, splice review, and full integrated reporting.",
+        {
+            "action": _enum_prop("Variant workflow step.", ["classify", "population_frequency", "clinvar", "splice", "full_report"], "full_report"),
+            "gene_symbol": _str_prop("HGNC gene symbol."),
+            "variant": _str_prop("Variant notation, rsID, HGVS, or protein-change string."),
+            "inheritance": _enum_prop("Inheritance mode for ACMG scoring.", ["AD", "AR", "XL", "unknown"], "unknown"),
+            "consequence": _str_prop("Optional VEP consequence if already known."),
+            "proband_phenotype": _str_prop("Clinical phenotype context."),
+            "populations": _array_prop("Population IDs to report for gnomAD frequencies."),
+        },
+        ["action"],
+    ),
+    _legacy_tool("find_repurposing_candidates"),
+    _legacy_tool("verify_biological_claim"),
+    _legacy_tool("search_cbio_mutations"),
+    _legacy_tool("search_gwas_catalog"),
+    _tool(
+        "session",
+        "Merged research-session workflow for entity resolution, knowledge-graph inspection, connection discovery, provenance export, and automated planning.",
+        {
+            "action": _enum_prop("Session workflow step.", ["resolve_entity", "knowledge_graph", "connections", "export", "plan"], "resolve_entity"),
+            "query": _str_prop("Entity query or planning goal."),
+            "hint_type": _str_prop("Entity type hint used for resolution."),
+            "goal": _str_prop("Explicit research goal for planning."),
+            "depth": _enum_prop("Planning depth.", ["quick", "standard", "deep"], "standard"),
+            "min_path_length": _int_prop("Minimum path length for unexpected connections.", 2, 1, 6),
+        },
+        ["action"],
+    ),
+    _tool(
+        "drug_interaction_checker",
+        "Check FDA label interaction context between a primary drug and a list of co-medications.",
+        {
+            "drug_name": _str_prop("Primary drug name."),
+            "co_medications": _array_prop("Co-medications to screen against the primary label."),
+        },
+        ["drug_name"],
+    ),
+    _tool(
+        "protein_binding_pocket",
+        "Summarize candidate binding sites from UniProt functional-site annotations plus AlphaFold confidence context.",
+        {
+            "accession": _str_prop("UniProt accession."),
+            "query": _str_prop("Protein or gene query used to resolve a reviewed accession."),
+            "max_sites": _int_prop("Maximum candidate sites to return.", 10, 1, 20),
+        },
+        [],
+    ),
+    _tool(
+        "biomarker_panel_design",
+        "Draft a disease-focused biomarker panel using Open Targets evidence with a literature fallback.",
+        {
+            "disease": _str_prop("Disease, indication, or phenotype of interest."),
+            "panel_size": _int_prop("Number of biomarkers to include.", 10, 3, 25),
+            "context": _str_prop("Context such as oncology, inflammation, or rare disease."),
+        },
+        ["disease"],
+    ),
+    _tool(
+        "pharmacogenomics_report",
+        "Summarize CPIC-style pharmacogenomic genes and supporting PGx evidence for a drug.",
+        {
+            "drug_name": _str_prop("Drug of interest."),
+            "gene_symbol": _str_prop("Optional gene to force into the report."),
+            "max_annotations": _int_prop("Maximum supporting annotations per gene.", 10, 1, 25),
+        },
+        ["drug_name"],
+    ),
+    _tool(
+        "protein_family_analysis",
+        "Summarize protein family and domain context from curated UniProt annotations with direct Pfam and InterPro links.",
+        {
+            "accession": _str_prop("UniProt accession."),
+            "query": _str_prop("Protein or gene query used to resolve an accession."),
+        },
+        [],
+    ),
+    _tool(
+        "network_enrichment",
+        "Summarize recurrent Reactome pathways and STRING network hubs across a gene set.",
+        {
+            "gene_list": _array_prop("Input genes for enrichment analysis."),
+            "min_string_score": _int_prop("Minimum STRING confidence score.", 700, 0, 1000),
+            "max_results": _int_prop("Maximum pathways and hubs to return.", 10, 3, 25),
+        },
+        ["gene_list"],
+    ),
+    _tool(
+        "rnaseq_deconvolution",
+        "Marker-based heuristic deconvolution of a bulk RNA-seq profile into likely cell-type fractions.",
+        {
+            "expression_profile": _obj_prop("Expression profile keyed by gene symbol with numeric abundance values."),
+            "ranked_genes": _array_prop("Optional ranked marker genes when numeric expression is unavailable."),
+            "max_cell_types": _int_prop("Maximum cell types to return.", 5, 2, 10),
+        },
+        [],
+    ),
+    _tool(
+        "structural_similarity",
+        "PubChem-backed structural similarity search from a compound name or SMILES string.",
+        {
+            "query": _str_prop("Compound name or identifier."),
+            "smiles": _str_prop("Canonical or query SMILES string."),
+            "threshold": _int_prop("PubChem 2D similarity threshold.", 90, 70, 99),
+            "max_results": _int_prop("Maximum similar compounds to return.", 10, 1, 25),
+        },
+        [],
+    ),
+    _tool(
+        "rare_disease_diagnosis",
+        "Normalize phenotype terms and rank OMIM differentials for a candidate gene.",
+        {
+            "phenotype_terms": _array_prop("Phenotype terms or symptoms to normalize."),
+            "gene_symbol": _str_prop("Candidate gene symbol."),
+            "max_results": _int_prop("Maximum ranked differentials to return.", 10, 1, 20),
+        },
+        [],
+    ),
+    _tool(
+        "genome_browser_snapshot",
+        "Generate genome-browser links and locus context for a gene or explicit genomic interval.",
+        {
+            "gene_symbol": _str_prop("Gene symbol to resolve to a locus."),
+            "region": _str_prop("Explicit region such as 'chr17:43044295-43170245'."),
+            "flank_bp": _int_prop("Flanking sequence to include around the locus.", 25000, 1000, 500000),
+            "assembly": _enum_prop("Genome assembly.", ["GRCh38", "GRCh37"], "GRCh38"),
+        },
+        [],
+    ),
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Hypothesis Handler
@@ -1009,6 +1387,33 @@ async def _plan_and_execute_research(
     )
 
 
+async def _session_workflow(
+    action: str,
+    query: str = "",
+    hint_type: str = "gene",
+    goal: str = "",
+    depth: str = "standard",
+    min_path_length: int = 2,
+) -> dict[str, Any]:
+    action = action.lower()
+    if action == "resolve_entity":
+        if not query:
+            raise ValueError("query is required when action='resolve_entity'.")
+        return await _resolve_entity(query=query, hint_type=hint_type)
+    if action == "knowledge_graph":
+        return await _get_session_knowledge_graph()
+    if action == "connections":
+        return await _find_biological_connections(min_path_length=min_path_length)
+    if action == "export":
+        return await _export_research_session()
+    if action == "plan":
+        plan_goal = goal or query
+        if not plan_goal:
+            raise ValueError("goal or query is required when action='plan'.")
+        return await _plan_and_execute_research(goal=plan_goal, depth=depth)
+    raise ValueError("Unsupported session action.")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dispatcher — FIX #2: removed all duplicate import blocks
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1071,6 +1476,25 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
         get_protein_domain_structure, analyze_coexpression,
         get_cancer_hotspots, predict_splice_impact,
     )
+    from biomcp.tools.strategy_surface import (
+        biomarker_panel_design,
+        boltz2_workflow,
+        crispr_analysis,
+        drug_interaction_checker,
+        drug_safety as drug_safety_workflow,
+        evo2_workflow,
+        find_protein,
+        genome_browser_snapshot,
+        network_enrichment,
+        pharmacogenomics_report,
+        pathway_analysis,
+        protein_binding_pocket,
+        protein_family_analysis,
+        rare_disease_diagnosis,
+        rnaseq_deconvolution,
+        structural_similarity,
+        variant_analysis,
+    )
 
     DISPATCH: dict[str, Any] = {
         # Literature
@@ -1082,10 +1506,12 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
         "search_proteins": search_proteins,
         "get_alphafold_structure": get_alphafold_structure,
         "search_pdb_structures": search_pdb_structures,
+        "find_protein": find_protein,
         # Pathways
         "search_pathways": search_pathways,
         "get_pathway_genes": get_pathway_genes,
         "get_reactome_pathways": get_reactome_pathways,
+        "pathway_analysis": pathway_analysis,
         # Drug Discovery
         "get_drug_targets": get_drug_targets,
         "get_compound_info": get_compound_info,
@@ -1102,8 +1528,8 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
         "query_neuroimaging_datasets": query_neuroimaging_datasets,
         "generate_research_hypothesis": _generate_research_hypothesis,
         # NVIDIA NIM
-        "predict_structure_boltz2": predict_structure_boltz2,
-        "generate_dna_evo2": generate_dna_evo2,
+        "predict_structure_boltz2": boltz2_workflow,
+        "generate_dna_evo2": evo2_workflow,
         "score_sequence_evo2": score_sequence_evo2,
         "design_protein_ligand": design_protein_ligand,
         # Extended Databases
@@ -1122,6 +1548,7 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
         "suggest_cell_lines": suggest_cell_lines,
         "estimate_statistical_power": estimate_statistical_power,
         # Session Intelligence
+        "session": _session_workflow,
         "resolve_entity": _resolve_entity,
         "get_session_knowledge_graph": _get_session_knowledge_graph,
         "find_biological_connections": _find_biological_connections,
@@ -1140,17 +1567,20 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
         "search_metabolomics": search_metabolomics,
         "get_ucsc_splice_variants": get_ucsc_splice_variants,
         # CRISPR
+        "crispr_analysis": crispr_analysis,
         "design_crispr_guides": design_crispr_guides,
         "score_guide_efficiency": score_guide_efficiency,
         "predict_off_target_sites": predict_off_target_sites,
         "design_base_editor_guides": design_base_editor_guides,
         "get_crispr_repair_outcomes": get_crispr_repair_outcomes,
         # FDA Drug Safety
+        "drug_safety": drug_safety_workflow,
         "query_adverse_events": query_adverse_events,
         "analyze_safety_signals": analyze_safety_signals,
         "get_drug_label_warnings": get_drug_label_warnings,
         "compare_drug_safety": compare_drug_safety,
         # Variant Interpreter
+        "variant_analysis": variant_analysis,
         "classify_variant": classify_variant,
         "get_population_frequency": get_population_frequency,
         "lookup_clinvar_variant": lookup_clinvar_variant,
@@ -1162,6 +1592,17 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
         "analyze_coexpression": analyze_coexpression,
         "get_cancer_hotspots": get_cancer_hotspots,
         "predict_splice_impact": predict_splice_impact,
+        # Strategy additions
+        "drug_interaction_checker": drug_interaction_checker,
+        "protein_binding_pocket": protein_binding_pocket,
+        "biomarker_panel_design": biomarker_panel_design,
+        "pharmacogenomics_report": pharmacogenomics_report,
+        "protein_family_analysis": protein_family_analysis,
+        "network_enrichment": network_enrichment,
+        "rnaseq_deconvolution": rnaseq_deconvolution,
+        "structural_similarity": structural_similarity,
+        "rare_disease_diagnosis": rare_disease_diagnosis,
+        "genome_browser_snapshot": genome_browser_snapshot,
     }
 
     if name not in DISPATCH:
@@ -1195,14 +1636,19 @@ def create_server() -> Server:
         _has_icon = False
 
     server_kwargs: dict[str, Any] = {
-        "instructions": "Heuris-BioMCP — Connect Claude to 20+ biological databases and AI models.",
+        "instructions": (
+            "Heuris-BioMCP — Connect ChatGPT, Claude, and other MCP clients "
+            "to a curated strategic surface of about 30 life-science tools spanning literature, "
+            "genomics, proteomics, clinical data, CRISPR, drug safety, variant interpretation, "
+            "and translational workflow design."
+        ),
     }
 
     # Only add website_url if mcp SDK supports it (≥1.3.0)
     try:
-        server = Server("heuris-biomcp", version="2.2.0", **server_kwargs)
+        server = Server(SERVER_NAME, version=__version__, **server_kwargs)
     except TypeError:
-        server = Server("heuris-biomcp")
+        server = Server(SERVER_NAME)
 
     if _has_icon:
         import base64, os
@@ -1243,7 +1689,7 @@ async def _run() -> None:
     )
 
     n_tools = len(TOOLS)
-    logger.info(f"🧬 BioMCP v2.2 starting — {n_tools} tools registered")
+    logger.info(f"🧬 {SERVER_DISPLAY_NAME} v{__version__} starting — {n_tools} tools registered")
     logger.info(f"   NCBI key : {'✓' if os.getenv('NCBI_API_KEY') else '✗ (3 req/s)'}")
     logger.info(f"   Boltz-2  : {'✓' if os.getenv('NVIDIA_BOLTZ2_API_KEY') else '✗'}")
     logger.info(f"   Evo2     : {'✓' if os.getenv('NVIDIA_EVO2_API_KEY') else '✗'}")
@@ -1257,11 +1703,11 @@ async def _run() -> None:
         logger.info(f"   🌐 HTTP mode — port {http_port}")
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
-        from starlette.routing import Route, Mount
-        from starlette.responses import Response
+        from starlette.routing import Mount, Route
+        from starlette.responses import JSONResponse, Response
         from starlette.middleware.cors import CORSMiddleware
 
-        sse_transport = SseServerTransport("/messages/")
+        sse_transport = SseServerTransport(MESSAGE_PATH)
 
         async def handle_sse(request):
             async with sse_transport.connect_sse(
@@ -1270,9 +1716,23 @@ async def _run() -> None:
                 await server.run(streams[0], streams[1], server.create_initialization_options())
             return Response()
 
+        async def handle_health(request):
+            return JSONResponse(_build_health_report(transport_mode="http"))
+
+        async def handle_readiness(request):
+            payload = _build_readiness_report(transport_mode="http")
+            return JSONResponse(payload, status_code=200 if payload["ready"] else 503)
+
+        async def handle_tool_health(request):
+            return JSONResponse(_build_tool_health_report())
+
         app = Starlette(routes=[
-            Route("/sse", endpoint=handle_sse, methods=["GET"]),
-            Mount("/messages/", app=sse_transport.handle_post_message),
+            Route("/health", endpoint=handle_health, methods=["GET"]),
+            Route("/healthz", endpoint=handle_health, methods=["GET"]),
+            Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
+            Route("/tool-health", endpoint=handle_tool_health, methods=["GET"]),
+            Route(SSE_PATH, endpoint=handle_sse, methods=["GET"]),
+            Mount(MESSAGE_PATH, app=sse_transport.handle_post_message),
         ])
         app.add_middleware(CORSMiddleware, allow_origins=["*"],
                            allow_methods=["*"], allow_headers=["*"])

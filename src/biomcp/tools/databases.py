@@ -484,8 +484,10 @@ async def get_disgenet_associations(
     resp = await client.get(
         f"{DISGENET_BASE}/gda/gene/{gene_symbol}",
         params={"min_score": min_score, "limit": max_results, "format": "json"},
-        headers={"Accept": "application/json",
-                 "User-Agent": "BioMCP/2.2 (+https://github.com/SachinGawande2003/biomcp)"},
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Heuris-BioMCP/2.2 (+https://github.com/SachinGawande2003/Heuris-BioMCP)",
+        },
     )
 
     if resp.status_code == 404:

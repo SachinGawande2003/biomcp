@@ -5,14 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
-[![Tools: 71](https://img.shields.io/badge/Tools-71-blue.svg)](#tools-71-total)
+[![Tools: 31](https://img.shields.io/badge/Tools-31-blue.svg)](#tools-31-curated-public-surface)
 [![Databases: 30+](https://img.shields.io/badge/Databases-30+-purple.svg)](#databases--ai-models)
 [![Live Demo](https://img.shields.io/badge/Live-Demo-brightgreen)](https://heuris-biomcp.onrender.com)
 
-**The most comprehensive Model Context Protocol server for life sciences v2.**  
-Connect Claude to every major biological database and state-of-the-art AI models — no API wrappers, no copy-pasting, just science.
+**Strategic Model Context Protocol server for life sciences.**  
+Connect ChatGPT, Claude, and other MCP clients to a curated biology tool surface built for research, translational workflows, and production review.
 
-[🚀 Quick Start](#quick-start) • [🔧 Tools](#tools-71-total) • [📊 Databases](#databases--ai-models) • [💡 Examples](#usage-examples) • [🤝 Contributing](#contributing)
+[🚀 Quick Start](#quick-start) • [🔧 Tools](#tools-31-curated-public-surface) • [📊 Databases](#databases--ai-models) • [💡 Examples](#usage-examples) • [🤝 Contributing](#contributing)
 
 </div>
 
@@ -62,154 +62,75 @@ Watch how to connect Heuris-BioMCP to Claude Desktop:
 
 ## What is Heuris-BioMCP?
 
-Heuris-BioMCP bridges Claude and the world's life sciences databases through the [Model Context Protocol](https://modelcontextprotocol.io). Ask Claude to **search PubMed**, **predict protein structure** with AI, **generate DNA sequences**, **find drug targets**, **query clinical trials**, **analyze single-cell data**, **verify biological claims**, or **generate research hypotheses** — all in natural language, all in real time.
+Heuris-BioMCP bridges MCP clients and high-value life-science data sources through a curated public tool surface. The server exposes the workflows that matter most for product review and research use, while lower-level helper modules remain internal for composition and planner logic.
 
 ```
-You → "What drugs target EGFR and what clinical trials are recruiting?"
-Claude + Heuris-BioMCP → Queries ChEMBL + ClinicalTrials.gov simultaneously → Structured answer
+You -> "What drugs target EGFR and what clinical trials are recruiting?"
+ChatGPT + Heuris-BioMCP -> Queries ChEMBL + ClinicalTrials.gov -> Structured answer
 ```
 
 ---
 
-## What's New in v2.2
+## What's New in v2.3
 
-- **71-tool server surface**: Expanded tool registry covering literature, omics, clinical, CRISPR, safety, variants, and innovation workflows
-- **CRISPR Design Suite**: Guide design, efficiency scoring, off-target analysis, base editing, and repair-outcome prediction
-- **FDA Drug Safety Intelligence**: FAERS adverse event search, disproportionality analysis, label warnings, and head-to-head safety comparison
-- **Variant Interpretation**: ACMG/AMP classification, gnomAD population frequency lookups, and ClinVar evidence retrieval
-- **Innovation Workflows**: Bulk multi-gene analysis, pathway enrichment, preprint search, InterPro domain mapping, coexpression, cancer hotspots, and splice impact prediction
-- **Tier 2 Database Expansion**: BioGRID, Orphanet, TCGA/GDC, CellMarker, ENCODE, MetaboLights, and UCSC splice isoforms
-- **Session Intelligence**: Entity resolution, session knowledge graph, biological connection discovery, export, and adaptive research planning
-- **Remote MCP Deployment**: HTTP/SSE server support for hosted endpoints such as Render
+- Curated the public MCP surface from a broad 71-tool registry down to a strategy-driven set of 31 review-friendly tools
+- Merged operational suites into workflow tools: `find_protein`, `pathway_analysis`, `crispr_analysis`, `drug_safety`, `variant_analysis`, and `session`
+- Added new translational tools: `drug_interaction_checker`, `protein_binding_pocket`, `biomarker_panel_design`, `pharmacogenomics_report`, `protein_family_analysis`, `network_enrichment`, `rnaseq_deconvolution`, `structural_similarity`, `rare_disease_diagnosis`, and `genome_browser_snapshot`
+- Removed low-signal or niche tools from the public MCP registry while keeping lower-level code available internally
+- Preserved hosted HTTP/SSE deployment and operational endpoints for production-style MCP review
 
 ---
 
-## Tools (71 total)
+## Tools (31 curated public surface)
 
-### 📚 Literature & NCBI
+### Core Research
 | Tool | Description |
 |------|-------------|
-| `search_pubmed` | Full PubMed search with MeSH, Boolean, field tags. Returns abstracts, authors, DOIs |
-| `get_gene_info` | NCBI Gene: symbol, location, aliases, RefSeq IDs, functional summary |
-| `run_blast` | NCBI BLAST alignment (blastp/blastn/blastx/tblastn) — async, non-blocking |
+| `search_pubmed` | PubMed literature search with MeSH, Boolean syntax, abstracts, and metadata |
+| `get_gene_info` | NCBI Gene summary with aliases, locus, and functional context |
+| `run_blast` | NCBI BLAST sequence alignment |
+| `get_protein_info` | Full UniProt Swiss-Prot protein record |
+| `find_protein` | Unified UniProt plus PDB protein discovery workflow |
+| `get_alphafold_structure` | AlphaFold structure metadata and confidence summary |
+| `pathway_analysis` | Merged KEGG plus Reactome pathway workflow |
+| `get_drug_targets` | ChEMBL drug-target evidence for a gene |
+| `get_gene_disease_associations` | Open Targets translational gene-disease evidence |
+| `search_clinical_trials` | ClinicalTrials.gov recruiting-trial search |
+| `multi_omics_gene_report` | Integrated multi-database flagship gene report |
 
-### 🧪 Proteins & Structures
+### AI And Engineering Workflows
 | Tool | Description |
 |------|-------------|
-| `get_protein_info` | UniProt Swiss-Prot: function, domains, PTMs, GO terms, disease links |
-| `search_proteins` | Search UniProt by gene, function, or disease with species filtering |
-| `get_alphafold_structure` | AlphaFold DB: pLDDT confidence scores, PDB/mmCIF download URLs, PAE data |
-| `search_pdb_structures` | RCSB PDB: experimental structures with resolution, method, deposition date |
+| `predict_structure_boltz2` | Boltz-2 structure workflow with optional protein-ligand mode |
+| `generate_dna_evo2` | Evo2 generation or WT-vs-variant scoring workflow |
+| `crispr_analysis` | Merged CRISPR design, scoring, off-target, base-edit, and repair workflow |
+| `drug_safety` | Merged FDA safety workflow for events, signals, labels, and comparisons |
+| `variant_analysis` | Merged ACMG, gnomAD, ClinVar, splice, and integrated variant reporting |
+| `session` | Merged entity, graph, export, and adaptive planning workflow |
 
-### 🔬 Pathways
+### High-Value Translational Tools
 | Tool | Description |
 |------|-------------|
-| `search_pathways` | KEGG pathway search with organism-specific viewer links |
-| `get_pathway_genes` | All genes in a KEGG pathway with descriptions |
-| `get_reactome_pathways` | Reactome pathways for a gene with hierarchy and diagram links |
+| `find_repurposing_candidates` | Drug repurposing workflow over literature, trials, and target evidence |
+| `verify_biological_claim` | Cross-database biological claim verification |
+| `search_cbio_mutations` | Cancer mutation frequency search |
+| `search_gwas_catalog` | GWAS trait-association search |
+| `drug_interaction_checker` | FDA label-based interaction screening |
+| `protein_binding_pocket` | Candidate binding-site summary from annotated protein features |
+| `biomarker_panel_design` | Disease-focused biomarker panel drafting |
+| `pharmacogenomics_report` | CPIC-style pharmacogenomics summary with PGx evidence |
+| `protein_family_analysis` | Protein family and domain context |
+| `network_enrichment` | Gene-set pathway and interaction-hub enrichment summary |
+| `rnaseq_deconvolution` | Marker-based bulk RNA-seq deconvolution |
+| `structural_similarity` | PubChem-based chemical structural similarity search |
+| `rare_disease_diagnosis` | Phenotype normalization plus OMIM-oriented rare-disease differential support |
+| `genome_browser_snapshot` | Browser-ready locus context for genes and genomic intervals |
 
-### 💊 Drug Discovery
-| Tool | Description |
-|------|-------------|
-| `get_drug_targets` | ChEMBL: drugs/compounds targeting a gene with IC50, Ki, approval status |
-| `get_compound_info` | ChEMBL compound details: SMILES, ADMET, Lipinski Ro5, QED, indications |
-| `get_gene_disease_associations` | Open Targets: gene-disease evidence across genetics, drugs, and pathways |
+### Public Surface Policy
 
-### 🧬 Genomics & Expression
-| Tool | Description |
-|------|-------------|
-| `get_gene_variants` | Ensembl variants: SNPs, indels, consequence types, clinical significance |
-| `search_gene_expression` | NCBI GEO datasets for a gene with organism, platform, sample counts |
-| `search_scrna_datasets` | Human Cell Atlas single-cell RNA-seq by tissue and technology |
-
-### 🏥 Clinical
-| Tool | Description |
-|------|-------------|
-| `search_clinical_trials` | ClinicalTrials.gov: trials with status, phase, interventions, eligibility |
-| `get_trial_details` | Full trial protocol: arms, outcomes, contacts |
-
-### 🤖 AI-Powered (NVIDIA NIM)
-| Tool | Description |
-|------|-------------|
-| `predict_structure_boltz2` | MIT Boltz-2: Protein/DNA/RNA/ligand structure prediction + binding affinity (FEP accuracy, 1000x faster) |
-| `generate_dna_evo2` | Arc Evo2-40B: Generate DNA sequences with 40B parameter genomic foundation model |
-| `score_sequence_evo2` | Compare wildtype vs variant DNA sequences for variant effect prediction |
-| `design_protein_ligand` | Full drug-discovery pipeline: UniProt → Boltz-2 structure + affinity in one call |
-
-### 🌐 Integrated & Advanced
-| Tool | Description |
-|------|-------------|
-| `multi_omics_gene_report` | **Flagship**: 7+ databases queried in parallel → one integrated gene report |
-| `query_neuroimaging_datasets` | OpenNeuro + NeuroVault: fMRI/EEG/MEG datasets with acquisition metadata |
-| `generate_research_hypothesis` | Literature mining → data-driven testable hypotheses with supporting evidence |
-
-### 🗄️ Extended Databases (v2)
-| Tool | Description |
-|------|-------------|
-| `get_omim_gene_diseases` | OMIM: gene-disease relationships, inheritance patterns, phenotypes |
-| `get_string_interactions` | STRING: protein-protein interactions with confidence scores |
-| `get_gtex_expression` | GTEx: gene expression by tissue with TPM/FPKM values |
-| `search_cbio_mutations` | cBioPortal: cancer genomics mutations, copy number alterations |
-| `search_gwas_catalog` | GWAS Catalog: trait-associated SNPs with p-values and effect sizes |
-| `get_disgenet_associations` | DisGeNET: gene-disease associations with evidence scores |
-| `get_pharmgkb_variants` | PharmGKB: pharmacogenomic variants and drug responses |
-
-### ✅ Verification & Conflict Detection (v2)
-| Tool | Description |
-|------|-------------|
-| `verify_biological_claim` | Verify claims against multiple databases with graded evidence (strong/moderate/weak/contradicted) |
-| `detect_database_conflicts` | Identify inconsistencies across databases with conflict resolution suggestions |
-
-### 🧬 Experimental Design (v2)
-| Tool | Description |
-|------|-------------|
-| `generate_experimental_protocol` | Generate step-by-step experimental protocols with controls and timelines |
-| `suggest_cell_lines` | Recommend appropriate cell lines based on research goals |
-| `estimate_statistical_power` | Calculate statistical power and sample size requirements |
-
-### 🧠 Session Intelligence (v2)
-| Tool | Description |
-|------|-------------|
-| `resolve_entity` | Canonical cross-database entity resolution (HGNC/UniProt/Ensembl/NCBI) |
-| `get_session_knowledge_graph` | Live entity graph auto-built from all tool calls in session |
-| `find_biological_connections` | Discover cross-database connections between entities |
-| `export_research_session` | Full provenance + citations + reproducible Python script |
-| `plan_and_execute_research` | DAG-based adaptive research workflow planner |
-
-### 🧬 CRISPR Design Suite (5 tools)
-| Tool | Description |
-|------|-------------|
-| `design_crispr_guides` | Design CRISPR sgRNA guides with Doench 2016 efficiency scoring |
-| `score_guide_efficiency` | Score user-provided sgRNA using multi-feature model |
-| `predict_off_target_sites` | Predict off-target risk using seed-region analysis |
-| `design_base_editor_guides` | Design guides for CBE/ABE base editing |
-| `get_crispr_repair_outcomes` | Predict NHEJ/HDR outcomes and knockout probability |
-
-### 💉 FDA Drug Safety Intelligence (4 tools)
-| Tool | Description |
-|------|-------------|
-| `query_adverse_events` | Query FDA FAERS for drug safety signals |
-| `analyze_safety_signals` | Pharmacovigilance disproportionality analysis (PRR, ROR, IC) |
-| `get_drug_label_warnings` | Retrieve FDA label safety sections from DailyMed |
-| `compare_drug_safety` | Head-to-head safety comparison between drugs |
-
-### 🧪 Variant Interpreter (3 tools)
-| Tool | Description |
-|------|-------------|
-| `classify_variant` | ACMG/AMP 2015 guideline-based variant classification |
-| `get_population_frequency` | Query gnomAD v4 for population-specific allele frequencies |
-| `lookup_clinvar_variant` | Search ClinVar for clinical significance and submissions |
-
-### 🚀 Innovations (7 tools)
-| Tool | Description |
-|------|-------------|
-| `bulk_gene_analysis` | Parallel multi-gene comparison across NCBI, ChEMBL, Open Targets, and Reactome |
-| `compute_pathway_enrichment` | Fisher exact test pathway enrichment from gene lists |
-| `search_biorxiv` | Search bioRxiv and medRxiv preprints for the latest research |
-| `get_protein_domain_structure` | InterPro domain architecture and functional region lookup |
-| `analyze_coexpression` | TCGA/GTEx-inspired coexpression analysis for candidate genes |
-| `get_cancer_hotspots` | Cancer mutation hotspot mapping from public cancer genomics sources |
-| `predict_splice_impact` | Predict splice-region impact using Ensembl/VEP-style consequence rules |
+- The MCP registry is intentionally curated.
+- Lower-level legacy implementations still exist in the package for internal orchestration and testing.
+- Reviewers should evaluate the exposed MCP surface, not the hidden implementation inventory.
 
 ---
 
@@ -305,8 +226,8 @@ Or manually:
 
 ```bash
 # Clone the repository
-git clone https://github.com/SachinGawande2003/biomcp.git
-cd biomcp
+git clone https://github.com/SachinGawande2003/Heuris-BioMCP.git
+cd Heuris-BioMCP
 
 # Install (standard)
 pip install -e .
@@ -490,12 +411,31 @@ biomcp/
 | `NCBI_API_KEY` | NCBI API key (increases rate limit to 10/s) | None (3/s) |
 | `NVIDIA_BOLTZ2_API_KEY` | NVIDIA API key for Boltz-2 structure prediction | None |
 | `NVIDIA_EVO2_API_KEY` | NVIDIA API key for Evo2-40B DNA generation | None |
+| `NVIDIA_NIM_API_KEY` | Shared fallback key for both NVIDIA model integrations | None |
+| `BIOGRID_API_KEY` | BioGRID key for curated interaction queries | None |
+| `BIOMCP_TRANSPORT` | Transport mode: `stdio` or `http` | `stdio` |
+| `BIOMCP_HTTP_PORT` | HTTP port for hosted SSE deployments | `8080` |
 | `BIOMCP_LOG_LEVEL` | Log level: DEBUG/INFO/WARNING/ERROR | INFO |
 
 Get free API keys:
 - **NCBI**: https://www.ncbi.nlm.nih.gov/account/
 - **NVIDIA Boltz-2**: https://build.nvidia.com/mit/boltz2
 - **NVIDIA Evo2-40B**: https://build.nvidia.com/arc/evo2-40b
+- **BioGRID**: https://webservice.thebiogrid.org/
+
+## Operational Endpoints
+
+When BioMCP runs in hosted HTTP mode, these operational routes are available:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/healthz` | Liveness and deployment metadata |
+| `/readyz` | Readiness check for orchestrators and load balancers |
+| `/tool-health` | Capability-level status, including missing optional API keys |
+| `/sse` | MCP SSE endpoint |
+| `/messages/` | MCP message transport endpoint |
+
+These endpoints are designed for deployment review, Render health checks, and production smoke tests.
 
 ---
 
@@ -533,7 +473,7 @@ If you use Heuris-BioMCP in your research, please cite:
 @software{biomcp2025,
   title   = {Heuris-BioMCP v2: A Comprehensive MCP Server for Bioinformatics, AI Models, and Life Sciences},
   year    = {2025},
-  url     = {https://github.com/SachinGawande2003/biomcp},
+  url     = {https://github.com/SachinGawande2003/Heuris-BioMCP},
   license = {MIT}
 }
 ```

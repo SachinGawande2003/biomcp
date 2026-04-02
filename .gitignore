@@ -29,6 +29,7 @@ ENV/
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
+pytest-cache-files-*/
 .coverage
 htmlcov/
 *.log

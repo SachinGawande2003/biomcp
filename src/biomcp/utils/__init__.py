@@ -72,8 +72,9 @@ async def get_http_client() -> httpx.AsyncClient:
                     follow_redirects=True,
                     headers={
                         "User-Agent": (
-                            "BioMCP/1.0 (https://github.com/biomcp/biomcp; "
-                            "bioinformatics MCP server for Claude)"
+                            "Heuris-BioMCP/2.2 "
+                            "(https://github.com/SachinGawande2003/Heuris-BioMCP; "
+                            "bioinformatics MCP server for MCP clients)"
                         ),
                         "Accept-Encoding": "gzip, deflate",
                     },

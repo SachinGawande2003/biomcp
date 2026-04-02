@@ -33,8 +33,8 @@ HCA_BASE        = "https://service.azul.data.humancellatlas.org"
 _CT_HEADERS: dict[str, str] = {
     "Accept":          "application/json",
     "User-Agent":      (
-        "Mozilla/5.0 (compatible; BioMCP/2.2; "
-        "+https://github.com/SachinGawande2003/biomcp)"
+        "Mozilla/5.0 (compatible; Heuris-BioMCP/2.2; "
+        "+https://github.com/SachinGawande2003/Heuris-BioMCP)"
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
