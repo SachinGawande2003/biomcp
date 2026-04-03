@@ -8,6 +8,7 @@ legacy handlers internally for planner and composition workflows.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -26,6 +27,7 @@ from biomcp.utils import close_http_client, format_error, format_success
 
 SERVER_NAME = "heuris-biomcp"
 SERVER_DISPLAY_NAME = "Heuris-BioMCP"
+STREAMABLE_HTTP_PATH = "/mcp"
 SSE_PATH = "/sse"
 MESSAGE_PATH = "/messages/"
 DEFAULT_SERVER_WEBSITE_URL = "https://heuris-biomcp.onrender.com"
@@ -183,6 +185,7 @@ def _build_health_report(transport_mode: str | None = None) -> dict[str, Any]:
         "tool_count": len(TOOLS),
         "transport": {
             "mode": mode,
+            "streamable_http_path": STREAMABLE_HTTP_PATH if mode == "http" else None,
             "sse_path": SSE_PATH if mode == "http" else None,
             "message_path": MESSAGE_PATH if mode == "http" else None,
         },
@@ -199,6 +202,23 @@ def _build_readiness_report(transport_mode: str | None = None) -> dict[str, Any]
         "ready": bool(TOOLS),
         "transport_mode": mode,
         "tool_count": len(TOOLS),
+    }
+
+
+def _build_root_report(transport_mode: str | None = None) -> dict[str, Any]:
+    mode = transport_mode or os.getenv("BIOMCP_TRANSPORT", "stdio")
+    base_url = _server_website_url().rstrip("/")
+    return {
+        "service": SERVER_NAME,
+        "display_name": SERVER_DISPLAY_NAME,
+        "version": __version__,
+        "status": "ok",
+        "transport_mode": mode,
+        "recommended_remote_url": f"{base_url}{STREAMABLE_HTTP_PATH}" if mode == "http" else None,
+        "legacy_sse_url": f"{base_url}{SSE_PATH}" if mode == "http" else None,
+        "health_url": f"{base_url}/healthz" if mode == "http" else None,
+        "ready_url": f"{base_url}/readyz" if mode == "http" else None,
+        "tool_health_url": f"{base_url}/tool-health" if mode == "http" else None,
     }
 
 
@@ -1469,6 +1489,11 @@ def _resource_payload(uri: str) -> dict[str, Any]:
             "display_name": SERVER_DISPLAY_NAME,
             "version": __version__,
             "transport_modes": ["stdio", "http"],
+            "transport_endpoints": {
+                "streamable_http": STREAMABLE_HTTP_PATH,
+                "sse": SSE_PATH,
+                "messages": MESSAGE_PATH,
+            },
             "health_endpoints": ["/health", "/healthz", "/readyz", "/tool-health"],
             "public_tool_count": len(TOOLS),
             "resource_uris": sorted(_RESOURCE_METADATA),
@@ -1947,6 +1972,14 @@ def create_server() -> Server:
     return server
 
 
+class _StreamableHTTPASGIApp:
+    def __init__(self, session_manager: Any) -> None:
+        self.session_manager = session_manager
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self.session_manager.handle_request(scope, receive, send)
+
+
 async def _run() -> None:
     logger.remove()
     logger.add(
@@ -1970,12 +2003,15 @@ async def _run() -> None:
     if transport_mode == "http":
         logger.info(f"   🌐 HTTP mode — port {http_port}")
         from mcp.server.sse import SseServerTransport
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
         from starlette.applications import Starlette
         from starlette.middleware.cors import CORSMiddleware
         from starlette.responses import FileResponse, JSONResponse, Response
         from starlette.routing import Mount, Route
 
         sse_transport = SseServerTransport(MESSAGE_PATH)
+        streamable_http_manager = StreamableHTTPSessionManager(app=server)
+        streamable_http_app = _StreamableHTTPASGIApp(streamable_http_manager)
 
         async def handle_sse(request):
             async with sse_transport.connect_sse(
@@ -1994,21 +2030,48 @@ async def _run() -> None:
         async def handle_tool_health(request):
             return JSONResponse(_build_tool_health_report())
 
+        async def handle_root(request):
+            return JSONResponse(_build_root_report(transport_mode="http"))
+
+        async def handle_streamable_http_head(request):
+            return JSONResponse(
+                {
+                    "service": SERVER_NAME,
+                    "status": "ok",
+                    "transport": "streamable_http",
+                    "endpoint": STREAMABLE_HTTP_PATH,
+                }
+            )
+
         async def handle_logo(request):
             logo_path = _resolve_logo_path()
             if logo_path is None:
                 return Response(status_code=404)
             return FileResponse(logo_path, media_type="image/jpeg")
 
-        app = Starlette(routes=[
-            Route(LOGO_ROUTE_PATH, endpoint=handle_logo, methods=["GET"]),
-            Route("/health", endpoint=handle_health, methods=["GET"]),
-            Route("/healthz", endpoint=handle_health, methods=["GET"]),
-            Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
-            Route("/tool-health", endpoint=handle_tool_health, methods=["GET"]),
-            Route(SSE_PATH, endpoint=handle_sse, methods=["GET"]),
-            Mount(MESSAGE_PATH, app=sse_transport.handle_post_message),
-        ])
+        @contextlib.asynccontextmanager
+        async def lifespan(app: Starlette):
+            async with streamable_http_manager.run():
+                try:
+                    yield
+                finally:
+                    await close_http_client()
+
+        app = Starlette(
+            lifespan=lifespan,
+            routes=[
+                Route(LOGO_ROUTE_PATH, endpoint=handle_logo, methods=["GET"]),
+                Route("/health", endpoint=handle_health, methods=["GET"]),
+                Route("/healthz", endpoint=handle_health, methods=["GET"]),
+                Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
+                Route("/tool-health", endpoint=handle_tool_health, methods=["GET"]),
+                Route(SSE_PATH, endpoint=handle_sse, methods=["GET"]),
+                Route(STREAMABLE_HTTP_PATH, endpoint=handle_streamable_http_head, methods=["HEAD"]),
+                Route(STREAMABLE_HTTP_PATH, endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
+                Mount(MESSAGE_PATH, app=sse_transport.handle_post_message),
+                Route("/", endpoint=handle_root, methods=["GET"]),
+            ],
+        )
         app.add_middleware(CORSMiddleware, allow_origins=["*"],
                            allow_methods=["*"], allow_headers=["*"])
         import uvicorn

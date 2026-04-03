@@ -23,7 +23,7 @@ Connect ChatGPT, Claude, and other MCP clients to a curated biology tool surface
 Try Heuris-BioMCP without installing — connect to our live server:
 
 ```
-https://heuris-biomcp.onrender.com/sse
+https://heuris-biomcp.onrender.com/mcp
 ```
 
 ### Connect to Live Server
@@ -34,13 +34,15 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "heuris-biomcp": {
-      "url": "https://heuris-biomcp.onrender.com/sse"
+      "url": "https://heuris-biomcp.onrender.com/mcp"
     }
   }
 }
 ```
 
-> **Note**: The live demo supports all features. For local development or custom deployments, see [Local Installation](#installation).
+> **Note**: `https://heuris-biomcp.onrender.com/mcp` is the recommended remote MCP endpoint for modern clients. The legacy SSE endpoint remains available at `https://heuris-biomcp.onrender.com/sse`.
+>
+> **Claude update**: Anthropic now routes remote MCP connections through `Customize > Connectors`. Direct remote URLs in `claude_desktop_config.json` are no longer the recommended Claude Desktop path.
 
 ---
 
@@ -258,14 +260,16 @@ pip install -e ".[dev]"
 
 **For Remote HTTP Mode (using live demo or your own deployed server):**
 
-```json
-{
-  "mcpServers": {
-    "heuris-biomcp": {
-      "url": "https://heuris-biomcp.onrender.com/sse"
-    }
-  }
-}
+Use Claude's `Customize > Connectors` flow and enter:
+
+```
+https://heuris-biomcp.onrender.com/mcp
+```
+
+If you are connecting with an older MCP client that still expects SSE, use:
+
+```
+https://heuris-biomcp.onrender.com/sse
 ```
 
 > **💡 Tip**: Get a free [NCBI API key](https://www.ncbi.nlm.nih.gov/account/) to increase rate limits from 3 to 10 requests/second.

@@ -15,6 +15,7 @@ from biomcp.server import (
     TOOLS,
     _build_health_report,
     _build_readiness_report,
+    _build_root_report,
     _build_tool_health_report,
     _dispatch,
     _list_resource_definitions,
@@ -249,6 +250,8 @@ class TestMCPResources:
         payload = json.loads(contents[0].content)
         assert payload["service"] == "heuris-biomcp"
         assert payload["transport_modes"] == ["stdio", "http"]
+        assert payload["transport_endpoints"]["streamable_http"] == "/mcp"
+        assert payload["transport_endpoints"]["sse"] == "/sse"
         assert "/readyz" in payload["health_endpoints"]
 
 
@@ -300,6 +303,7 @@ class TestOperationalHealth:
         assert report["service"] == "heuris-biomcp"
         assert report["version"] == __version__
         assert report["tool_count"] == len(TOOLS)
+        assert report["transport"]["streamable_http_path"] == "/mcp"
         assert report["transport"]["sse_path"] == "/sse"
         assert report["transport"]["message_path"] == "/messages/"
 
@@ -307,6 +311,15 @@ class TestOperationalHealth:
         report = _build_readiness_report("stdio")
         assert report["ready"] is True
         assert report["tool_count"] == len(TOOLS)
+
+    def test_root_report_recommends_streamable_http_url(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("BIOMCP_WEBSITE_URL", "https://example.com/biomcp")
+
+        report = _build_root_report("http")
+
+        assert report["recommended_remote_url"] == "https://example.com/biomcp/mcp"
+        assert report["legacy_sse_url"] == "https://example.com/biomcp/sse"
+        assert report["health_url"] == "https://example.com/biomcp/healthz"
 
     def test_tool_health_reflects_missing_optional_keys(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("NVIDIA_BOLTZ2_API_KEY", raising=False)
