@@ -28,6 +28,8 @@ SERVER_NAME = "heuris-biomcp"
 SERVER_DISPLAY_NAME = "Heuris-BioMCP"
 SSE_PATH = "/sse"
 MESSAGE_PATH = "/messages/"
+DEFAULT_SERVER_WEBSITE_URL = "https://heuris-biomcp.onrender.com"
+LOGO_ROUTE_PATH = "/logo.jpeg"
 
 CAPABILITY_CONFIG: dict[str, dict[str, Any]] = {
     "core_server": {
@@ -69,6 +71,27 @@ CAPABILITY_CONFIG: dict[str, dict[str, Any]] = {
         "required_env": ["NVIDIA_EVO2_API_KEY", "NVIDIA_NIM_API_KEY"],
     },
 }
+
+
+def _server_website_url() -> str:
+    return os.getenv("BIOMCP_WEBSITE_URL", DEFAULT_SERVER_WEBSITE_URL)
+
+
+def _server_icon_url() -> str:
+    return os.getenv("BIOMCP_ICON_URL", f"{_server_website_url().rstrip('/')}{LOGO_ROUTE_PATH}")
+
+
+def _resolve_logo_path() -> str | None:
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    candidates = [
+        os.path.join(root_dir, "LOGO.jpeg"),
+        os.path.join(os.path.dirname(__file__), "LOGO.jpeg"),
+        os.path.abspath("LOGO.jpeg"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1880,13 +1903,28 @@ def create_server() -> Server:
             "genomics, proteomics, clinical data, CRISPR, drug safety, variant interpretation, "
             "and translational workflow design."
         ),
+        "website_url": _server_website_url(),
     }
 
     # Only add website_url if mcp SDK supports it (≥1.3.0)
     try:
+        from mcp.types import Icon
+
+        server_kwargs["icons"] = [
+            Icon(src=_server_icon_url(), mimeType="image/jpeg", sizes=["512x512"])
+        ]
+    except ImportError:
+        pass
+
+    try:
         server = Server(SERVER_NAME, version=__version__, **server_kwargs)
     except TypeError:
-        server = Server(SERVER_NAME)
+        server_kwargs.pop("icons", None)
+        server_kwargs.pop("website_url", None)
+        try:
+            server = Server(SERVER_NAME, version=__version__, **server_kwargs)
+        except TypeError:
+            server = Server(SERVER_NAME)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -1934,7 +1972,7 @@ async def _run() -> None:
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
         from starlette.middleware.cors import CORSMiddleware
-        from starlette.responses import JSONResponse, Response
+        from starlette.responses import FileResponse, JSONResponse, Response
         from starlette.routing import Mount, Route
 
         sse_transport = SseServerTransport(MESSAGE_PATH)
@@ -1956,7 +1994,14 @@ async def _run() -> None:
         async def handle_tool_health(request):
             return JSONResponse(_build_tool_health_report())
 
+        async def handle_logo(request):
+            logo_path = _resolve_logo_path()
+            if logo_path is None:
+                return Response(status_code=404)
+            return FileResponse(logo_path, media_type="image/jpeg")
+
         app = Starlette(routes=[
+            Route(LOGO_ROUTE_PATH, endpoint=handle_logo, methods=["GET"]),
             Route("/health", endpoint=handle_health, methods=["GET"]),
             Route("/healthz", endpoint=handle_health, methods=["GET"]),
             Route("/readyz", endpoint=handle_readiness, methods=["GET"]),

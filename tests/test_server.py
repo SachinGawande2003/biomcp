@@ -19,6 +19,8 @@ from biomcp.server import (
     _dispatch,
     _list_resource_definitions,
     _read_resource_contents,
+    _resolve_logo_path,
+    create_server,
 )
 
 TOOL_IMPLEMENTATIONS = {
@@ -271,6 +273,25 @@ class TestDispatchSmoke:
         assert result["status"] == "success"
         assert result["tool"] == tool_name
         assert result["data"]["arguments"] == payload
+
+
+class TestServerBranding:
+    def test_logo_asset_is_resolvable(self):
+        logo_path = _resolve_logo_path()
+        assert logo_path is not None
+        assert logo_path.endswith("LOGO.jpeg")
+
+    def test_initialization_options_include_website_and_icon(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("BIOMCP_WEBSITE_URL", "https://example.com/biomcp")
+        monkeypatch.setenv("BIOMCP_ICON_URL", "https://example.com/biomcp/logo.jpeg")
+
+        options = create_server().create_initialization_options()
+
+        assert options.website_url == "https://example.com/biomcp"
+        assert options.icons is not None
+        assert len(options.icons) == 1
+        assert options.icons[0].src == "https://example.com/biomcp/logo.jpeg"
+        assert options.icons[0].mimeType == "image/jpeg"
 
 
 class TestOperationalHealth:
