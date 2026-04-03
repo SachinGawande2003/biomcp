@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from biomcp.utils import (
     BioValidator,
     cached,
@@ -228,11 +230,18 @@ async def get_drug_targets(
     client      = await get_http_client()
 
     # Step 1 — find target
-    tgt_resp = await client.get(
-        f"{CHEMBL_BASE}/target/search.json",
-        params={"q": gene_symbol, "organism": "Homo sapiens", "limit": 5},
-    )
-    tgt_resp.raise_for_status()
+    try:
+        tgt_resp = await client.get(
+            f"{CHEMBL_BASE}/target/search.json",
+            params={"q": gene_symbol, "organism": "Homo sapiens", "limit": 5},
+        )
+        tgt_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        return {
+            "gene": gene_symbol,
+            "drugs": [],
+            "error": f"ChEMBL target lookup failed for '{gene_symbol}': {exc}",
+        }
     targets = tgt_resp.json().get("targets", [])
 
     if not targets:
@@ -243,16 +252,26 @@ async def get_drug_targets(
     target_name = targets[0].get("pref_name", "")
 
     # Step 2 — get activities
-    act_resp = await client.get(
-        f"{CHEMBL_BASE}/activity.json",
-        params={
-            "target_chembl_id":   target_id,
-            "standard_type__in":  "IC50,Ki,Kd,EC50,GI50",
-            "limit":              max_results,
-            "order_by":           "standard_value",
-        },
-    )
-    act_resp.raise_for_status()
+    try:
+        act_resp = await client.get(
+            f"{CHEMBL_BASE}/activity.json",
+            params={
+                "target_chembl_id":   target_id,
+                "standard_type__in":  "IC50,Ki,Kd,EC50,GI50",
+                "limit":              max_results,
+                "order_by":           "standard_value",
+            },
+        )
+        act_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        return {
+            "gene": gene_symbol,
+            "target_chembl_id": target_id,
+            "target_name": target_name,
+            "total_activities": 0,
+            "drugs": [],
+            "error": f"ChEMBL activity lookup failed for '{gene_symbol}': {exc}",
+        }
     act_data = act_resp.json()
 
     seen: set[str] = set()

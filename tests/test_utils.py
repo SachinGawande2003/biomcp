@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+import biomcp.utils as utils
 from biomcp.utils import BioValidator, get_cache, make_cache_key
 
 
@@ -108,3 +109,34 @@ class TestCache:
         cache1 = get_cache("pubmed")
         cache2 = get_cache("pubmed")
         assert cache1 is cache2
+
+
+@pytest.mark.asyncio
+async def test_get_http_client_recreates_client_for_new_event_loop(monkeypatch: pytest.MonkeyPatch):
+    class FakeClient:
+        def __init__(self):
+            self.is_closed = False
+
+        async def aclose(self):
+            self.is_closed = True
+
+    created: list[FakeClient] = []
+
+    def fake_async_client(**kwargs):
+        client = FakeClient()
+        created.append(client)
+        return client
+
+    stale_client = FakeClient()
+
+    monkeypatch.setattr(utils.httpx, "AsyncClient", fake_async_client)
+    monkeypatch.setattr(utils, "_HTTP_CLIENT", stale_client)
+    monkeypatch.setattr(utils, "_HTTP_CLIENT_LOOP_ID", -1)
+    monkeypatch.setattr(utils, "_HTTP_LOCK", None)
+
+    client = await utils.get_http_client()
+
+    assert client is created[0]
+    assert client is not stale_client
+
+    await utils.close_http_client()

@@ -47,6 +47,21 @@ async def test_get_drug_targets_no_target(mock_http_client, mock_http_response):
 
 
 @pytest.mark.asyncio
+async def test_get_drug_targets_handles_chembl_http_error(mock_http_client, mock_http_response):
+    error_resp = mock_http_response(status_code=500)
+    mock_http_client.get = AsyncMock(return_value=error_resp)
+
+    with patch("biomcp.tools.pathways.get_http_client", return_value=mock_http_client):
+        from biomcp.tools.pathways import get_drug_targets
+
+        result = await get_drug_targets.__wrapped__.__wrapped__.__wrapped__("EGFR")
+
+    assert result["gene"] == "EGFR"
+    assert result["drugs"] == []
+    assert "error" in result
+
+
+@pytest.mark.asyncio
 async def test_get_compound_info_not_found(mock_http_client, mock_http_response):
     """get_compound_info should handle 404 gracefully."""
     not_found = mock_http_response(status_code=404)

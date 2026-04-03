@@ -55,7 +55,8 @@ NCBI_API_KEY = os.getenv("NCBI_API_KEY", "")
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HTTP_CLIENT: httpx.AsyncClient | None = None
-_HTTP_LOCK = asyncio.Lock()
+_HTTP_CLIENT_LOOP_ID: int | None = None
+_HTTP_LOCK: asyncio.Lock | None = None
 
 
 async def get_http_client() -> httpx.AsyncClient:
@@ -64,7 +65,21 @@ async def get_http_client() -> httpx.AsyncClient:
     Thread-safe lazy init with asyncio.Lock.
     Connection pooling is handled by httpx internally.
     """
-    global _HTTP_CLIENT
+    global _HTTP_CLIENT, _HTTP_CLIENT_LOOP_ID, _HTTP_LOCK
+    current_loop_id = id(asyncio.get_running_loop())
+
+    if _HTTP_LOCK is None or _HTTP_CLIENT_LOOP_ID != current_loop_id:
+        _HTTP_LOCK = asyncio.Lock()
+
+    if (
+        _HTTP_CLIENT is not None
+        and not _HTTP_CLIENT.is_closed
+        and _HTTP_CLIENT_LOOP_ID is not None
+        and _HTTP_CLIENT_LOOP_ID != current_loop_id
+    ):
+        logger.debug("Discarding HTTP client bound to a different event loop")
+        _HTTP_CLIENT = None
+
     if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
         async with _HTTP_LOCK:
             if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
@@ -85,17 +100,28 @@ async def get_http_client() -> httpx.AsyncClient:
                         keepalive_expiry=30.0,
                     ),
                 )
+                _HTTP_CLIENT_LOOP_ID = current_loop_id
                 logger.debug("HTTP client initialized")
     return _HTTP_CLIENT
 
 
 async def close_http_client() -> None:
     """Gracefully close the shared HTTP client on server shutdown."""
-    global _HTTP_CLIENT
-    if _HTTP_CLIENT and not _HTTP_CLIENT.is_closed:
-        await _HTTP_CLIENT.aclose()
-        _HTTP_CLIENT = None
-        logger.debug("HTTP client closed")
+    global _HTTP_CLIENT, _HTTP_CLIENT_LOOP_ID, _HTTP_LOCK
+    client = _HTTP_CLIENT
+    client_loop_id = _HTTP_CLIENT_LOOP_ID
+
+    _HTTP_CLIENT = None
+    _HTTP_CLIENT_LOOP_ID = None
+    _HTTP_LOCK = None
+
+    if client and not client.is_closed:
+        current_loop_id = id(asyncio.get_running_loop())
+        if client_loop_id == current_loop_id:
+            await client.aclose()
+            logger.debug("HTTP client closed")
+        else:
+            logger.debug("Discarded HTTP client from a different event loop")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
