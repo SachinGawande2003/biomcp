@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from tenacity import wait_none
 
 
 @pytest.mark.asyncio
@@ -53,12 +54,11 @@ async def test_get_reactome_pathways_handles_transport_error(mock_http_client):
         from biomcp.tools.pathways import get_reactome_pathways
 
         mock_http_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timed out"))
-        result = await get_reactome_pathways.__wrapped__.__wrapped__.__wrapped__("EGFR")
+        retrying_call = get_reactome_pathways.__wrapped__.__wrapped__.retry_with(wait=wait_none())
+        with pytest.raises(httpx.ConnectTimeout):
+            await retrying_call("EGFR")
 
-    assert result["gene"] == "EGFR"
-    assert result["pathways"] == []
-    assert result["total"] == 0
-    assert "error" in result
+    assert mock_http_client.post.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -108,11 +108,11 @@ async def test_get_drug_targets_handles_chembl_http_error(mock_http_client, mock
     with patch("biomcp.tools.pathways.get_http_client", return_value=mock_http_client):
         from biomcp.tools.pathways import get_drug_targets
 
-        result = await get_drug_targets.__wrapped__.__wrapped__.__wrapped__("EGFR")
+        retrying_call = get_drug_targets.__wrapped__.__wrapped__.retry_with(wait=wait_none())
+        with pytest.raises(httpx.HTTPStatusError):
+            await retrying_call("EGFR")
 
-    assert result["gene"] == "EGFR"
-    assert result["drugs"] == []
-    assert "error" in result
+    assert mock_http_client.get.await_count == 3
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -274,10 +274,17 @@ def with_retry(
     Uses tenacity with exponential backoff. Does NOT retry on
     ValueError / TypeError (bad user input — fail fast).
     """
+
+    def _is_retryable_http_exception(exc: BaseException) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code if exc.response is not None else None
+            return status_code in {408, 425, 429} or (
+                status_code is not None and 500 <= status_code < 600
+            )
+        return isinstance(exc, (httpx.RequestError, httpx.TimeoutException, httpx.ConnectError))
+
     return retry(
-        retry=retry_if_exception_type(
-            (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError)
-        ),
+        retry=retry_if_exception(_is_retryable_http_exception),
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
         before_sleep=lambda rs: logger.warning(
@@ -454,8 +461,14 @@ def format_error(
     if context:
         payload["context"] = context
 
+    if isinstance(error, httpx.HTTPStatusError):
+        payload["status_code"] = error.response.status_code
+        payload["url"] = str(error.request.url)
+    elif isinstance(error, httpx.RequestError) and error.request is not None:
+        payload["url"] = str(error.request.url)
+
     # Include traceback for unexpected errors only
-    if not isinstance(error, (ValueError, TypeError, KeyError, LookupError)):
+    if not isinstance(error, (ValueError, TypeError, KeyError, LookupError, httpx.HTTPError)):
         payload["traceback"] = traceback.format_exc()
 
     logger.error(f"[{tool_name}] {error_type}: {message}")

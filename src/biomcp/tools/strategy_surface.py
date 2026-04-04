@@ -534,18 +534,26 @@ async def pathway_analysis(
         search_term = query or gene_symbol
         if not search_term:
             raise ValueError("query or gene_symbol is required when action='search'.")
-        kegg_result = None
-        reactome_result = None
+        tasks: list[Any] = []
+        labels: list[str] = []
         if db in {"auto", "kegg"}:
-            kegg_result = await search_pathways(search_term, organism=organism)
+            labels.append("kegg")
+            tasks.append(search_pathways(search_term, organism=organism))
         if db in {"auto", "reactome"} and gene_symbol:
-            reactome_result = await get_reactome_pathways(gene_symbol)
+            labels.append("reactome")
+            tasks.append(get_reactome_pathways(gene_symbol))
+
+        gathered = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+        result_map = {
+            label: value if isinstance(value, dict) else {"error": str(value)}
+            for label, value in zip(labels, gathered, strict=False)
+        }
         return {
             "action": action,
             "db": db,
             "query": search_term,
-            "kegg": kegg_result,
-            "reactome": reactome_result,
+            "kegg": result_map.get("kegg"),
+            "reactome": result_map.get("reactome"),
         }
 
     if action == "gene_context":

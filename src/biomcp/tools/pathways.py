@@ -20,8 +20,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
 from biomcp.utils import (
     BioValidator,
     cached,
@@ -170,20 +168,11 @@ async def get_reactome_pathways(
     gene_symbol = BioValidator.validate_gene_symbol(gene_symbol)
     client      = await get_http_client()
 
-    try:
-        analysis_resp = await client.post(
-            f"{REACTOME_ANALYSIS}/identifiers/projection",
-            content=gene_symbol,
-            headers={"Content-Type": "text/plain", "Accept": "application/json"},
-        )
-    except httpx.HTTPError as exc:
-        return {
-            "gene": gene_symbol,
-            "species_taxid": species,
-            "total": 0,
-            "pathways": [],
-            "error": f"Reactome analysis failed for '{gene_symbol}': {exc}",
-        }
+    analysis_resp = await client.post(
+        f"{REACTOME_ANALYSIS}/identifiers/projection",
+        content=gene_symbol,
+        headers={"Content-Type": "text/plain", "Accept": "application/json"},
+    )
     if analysis_resp.status_code == 404:
         return {
             "gene": gene_symbol,
@@ -192,16 +181,7 @@ async def get_reactome_pathways(
             "pathways": [],
             "note": f"'{gene_symbol}' not found in Reactome.",
         }
-    try:
-        analysis_resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        return {
-            "gene": gene_symbol,
-            "species_taxid": species,
-            "total": 0,
-            "pathways": [],
-            "error": f"Reactome analysis failed for '{gene_symbol}': {exc}",
-        }
+    analysis_resp.raise_for_status()
 
     payload = analysis_resp.json()
     pathways: list[dict[str, Any]] = []
@@ -263,18 +243,11 @@ async def get_drug_targets(
     client      = await get_http_client()
 
     # Step 1 — find target
-    try:
-        tgt_resp = await client.get(
-            f"{CHEMBL_BASE}/target/search.json",
-            params={"q": gene_symbol, "organism": "Homo sapiens", "limit": 5},
-        )
-        tgt_resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        return {
-            "gene": gene_symbol,
-            "drugs": [],
-            "error": f"ChEMBL target lookup failed for '{gene_symbol}': {exc}",
-        }
+    tgt_resp = await client.get(
+        f"{CHEMBL_BASE}/target/search.json",
+        params={"q": gene_symbol, "organism": "Homo sapiens", "limit": 5},
+    )
+    tgt_resp.raise_for_status()
     targets = tgt_resp.json().get("targets", [])
 
     if not targets:
@@ -285,26 +258,16 @@ async def get_drug_targets(
     target_name = targets[0].get("pref_name", "")
 
     # Step 2 — get activities
-    try:
-        act_resp = await client.get(
-            f"{CHEMBL_BASE}/activity.json",
-            params={
-                "target_chembl_id":   target_id,
-                "standard_type__in":  "IC50,Ki,Kd,EC50,GI50",
-                "limit":              max_results,
-                "order_by":           "standard_value",
-            },
-        )
-        act_resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        return {
-            "gene": gene_symbol,
-            "target_chembl_id": target_id,
-            "target_name": target_name,
-            "total_activities": 0,
-            "drugs": [],
-            "error": f"ChEMBL activity lookup failed for '{gene_symbol}': {exc}",
-        }
+    act_resp = await client.get(
+        f"{CHEMBL_BASE}/activity.json",
+        params={
+            "target_chembl_id":   target_id,
+            "standard_type__in":  "IC50,Ki,Kd,EC50,GI50",
+            "limit":              max_results,
+            "order_by":           "standard_value",
+        },
+    )
+    act_resp.raise_for_status()
     act_data = act_resp.json()
 
     seen: set[str] = set()

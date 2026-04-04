@@ -7,8 +7,10 @@ from __future__ import annotations
 import importlib
 import json
 
+import httpx
 import pytest
 
+import biomcp.server as server_module
 from biomcp import __version__
 from biomcp.server import (
     _PUBLIC_TOOL_EXAMPLES,
@@ -276,6 +278,22 @@ class TestDispatchSmoke:
         assert result["status"] == "success"
         assert result["tool"] == tool_name
         assert result["data"]["arguments"] == payload
+
+    @pytest.mark.asyncio
+    async def test_dispatch_wraps_http_errors_as_structured_error(self, monkeypatch: pytest.MonkeyPatch):
+        request = httpx.Request("GET", "https://example.org/reactome")
+
+        async def _failing_dispatch(name: str, args: dict[str, object]) -> str:
+            raise httpx.ConnectTimeout("timed out", request=request)
+
+        monkeypatch.setattr(server_module, "_raw_dispatch", _failing_dispatch)
+
+        result = json.loads(await _dispatch("get_reactome_pathways", {"gene_symbol": "EGFR"}))
+
+        assert result["status"] == "error"
+        assert result["error_type"] == "ConnectTimeout"
+        assert result["url"] == "https://example.org/reactome"
+        assert "traceback" not in result
 
 
 class TestServerBranding:

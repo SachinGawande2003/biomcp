@@ -14,6 +14,7 @@ import os
 import sys
 from typing import Any
 
+import httpx
 from loguru import logger
 from mcp.server import Server
 from mcp.server.lowlevel.helper_types import ReadResourceContents
@@ -1909,6 +1910,8 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         result = await _raw_dispatch(name, args)
         return format_success(name, result)
     except (ValueError, TypeError, LookupError, KeyError) as exc:
+        return format_error(name, exc, {"arguments": args})
+    except httpx.HTTPError as exc:
         return format_error(name, exc, {"arguments": args})
     except Exception as exc:
         logger.exception(f"Unexpected error in tool '{name}'")
