@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 
@@ -50,7 +51,6 @@ async def test_get_drug_targets_no_target(mock_http_client, mock_http_response):
 async def test_get_reactome_pathways_handles_transport_error(mock_http_client):
     with patch("biomcp.tools.pathways.get_http_client", return_value=mock_http_client):
         from biomcp.tools.pathways import get_reactome_pathways
-        import httpx
 
         mock_http_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timed out"))
         result = await get_reactome_pathways.__wrapped__.__wrapped__.__wrapped__("EGFR")
@@ -59,6 +59,45 @@ async def test_get_reactome_pathways_handles_transport_error(mock_http_client):
     assert result["pathways"] == []
     assert result["total"] == 0
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_get_reactome_pathways_parses_analysis_service(mock_http_client, mock_http_response):
+    analysis_resp = mock_http_response(
+        json_data={
+            "identifiersNotFound": 0,
+            "pathways": [
+                {
+                    "stId": "R-HSA-177929",
+                    "name": "Signaling by EGFR",
+                    "species": {"taxId": "9606", "name": "Homo sapiens"},
+                    "entities": {"found": 1, "total": 64, "pValue": 0.0118, "fdr": 0.0125},
+                    "inDisease": False,
+                },
+                {
+                    "stId": "R-MMU-177929",
+                    "name": "Mouse EGFR signaling",
+                    "species": {"taxId": "10090", "name": "Mus musculus"},
+                    "entities": {"found": 1, "total": 40, "pValue": 0.02, "fdr": 0.03},
+                    "inDisease": False,
+                },
+            ],
+        }
+    )
+    mock_http_client.post = AsyncMock(return_value=analysis_resp)
+
+    with patch("biomcp.tools.pathways.get_http_client", return_value=mock_http_client):
+        from biomcp.tools.pathways import get_reactome_pathways
+
+        result = await get_reactome_pathways.__wrapped__.__wrapped__.__wrapped__("EGFR")
+
+    assert result["gene"] == "EGFR"
+    assert result["total"] == 1
+    assert result["pathways"][0]["reactome_id"] == "R-HSA-177929"
+    assert result["pathways"][0]["species"] == "Homo sapiens"
+    assert result["pathways"][0]["found_entities"] == 1
+    assert result["pathways"][0]["p_value"] == 0.0118
+    assert result["pathways"][0]["fdr"] == 0.0125
 
 
 @pytest.mark.asyncio
@@ -142,6 +181,25 @@ async def test_kegg_pathways_live():
     from biomcp.tools.pathways import search_pathways
 
     result = await search_pathways("apoptosis")
+    assert result["total"] > 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reactome_pathways_live():
+    from biomcp.tools.pathways import get_reactome_pathways
+
+    result = await get_reactome_pathways("EGFR")
+    assert result["total"] > 0
+    assert result["pathways"][0]["url"].startswith("https://reactome.org/content/detail/")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reactome_pathways_live_brca1():
+    from biomcp.tools.pathways import get_reactome_pathways
+
+    result = await get_reactome_pathways("BRCA1")
     assert result["total"] > 0
 
 

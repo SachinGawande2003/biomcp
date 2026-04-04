@@ -32,6 +32,7 @@ from biomcp.utils import (
 
 KEGG_BASE         = "https://rest.kegg.jp"
 REACTOME_BASE     = "https://reactome.org/ContentService"
+REACTOME_ANALYSIS = "https://reactome.org/AnalysisService"
 CHEMBL_BASE       = "https://www.ebi.ac.uk/chembl/api/data"
 OPENTARGETS_GQL   = "https://api.platform.opentargets.org/api/v4/graphql"
 
@@ -170,8 +171,8 @@ async def get_reactome_pathways(
     client      = await get_http_client()
 
     try:
-        map_resp = await client.post(
-            f"{REACTOME_BASE}/identifiers/mapping",
+        analysis_resp = await client.post(
+            f"{REACTOME_ANALYSIS}/identifiers/projection",
             content=gene_symbol,
             headers={"Content-Type": "text/plain", "Accept": "application/json"},
         )
@@ -181,42 +182,56 @@ async def get_reactome_pathways(
             "species_taxid": species,
             "total": 0,
             "pathways": [],
-            "error": f"Reactome mapping failed for '{gene_symbol}': {exc}",
+            "error": f"Reactome analysis failed for '{gene_symbol}': {exc}",
         }
-    if map_resp.status_code == 404:
-        return {"gene": gene_symbol, "total": 0, "pathways": [],
-                "note": f"'{gene_symbol}' not found in Reactome."}
+    if analysis_resp.status_code == 404:
+        return {
+            "gene": gene_symbol,
+            "species_taxid": species,
+            "total": 0,
+            "pathways": [],
+            "note": f"'{gene_symbol}' not found in Reactome.",
+        }
     try:
-        map_resp.raise_for_status()
+        analysis_resp.raise_for_status()
     except httpx.HTTPError as exc:
         return {
             "gene": gene_symbol,
             "species_taxid": species,
             "total": 0,
             "pathways": [],
-            "error": f"Reactome mapping failed for '{gene_symbol}': {exc}",
+            "error": f"Reactome analysis failed for '{gene_symbol}': {exc}",
         }
 
-    pathways: list[dict[str, str]] = []
-    for result in map_resp.json().get("results", []):
-        for entry in result.get("entries", []):
-            stid = entry.get("stId", "")
-            if not stid:
-                continue
-            pathways.append({
-                "reactome_id": stid,
-                "name":        entry.get("name", ""),
-                "type":        entry.get("type", ""),
-                "species":     entry.get("species", {}).get("name", ""),
-                "url":         f"https://reactome.org/content/detail/{stid}",
-                "diagram_url": f"https://reactome.org/PathwayBrowser/#/{stid}",
-            })
+    payload = analysis_resp.json()
+    pathways: list[dict[str, Any]] = []
+    for entry in payload.get("pathways", []):
+        stid = entry.get("stId", "")
+        species_info = entry.get("species") or {}
+        species_taxid = str(species_info.get("taxId", ""))
+        if not stid or (species and species_taxid and species_taxid != species):
+            continue
+
+        entity_stats = entry.get("entities") or {}
+        pathways.append({
+            "reactome_id": stid,
+            "name": entry.get("name", ""),
+            "type": "DiseasePathway" if entry.get("inDisease") else "Pathway",
+            "species": species_info.get("name", ""),
+            "url": f"https://reactome.org/content/detail/{stid}",
+            "diagram_url": f"https://reactome.org/PathwayBrowser/#/{stid}",
+            "found_entities": entity_stats.get("found", 0),
+            "total_entities": entity_stats.get("total", 0),
+            "p_value": entity_stats.get("pValue"),
+            "fdr": entity_stats.get("fdr"),
+            "in_disease": bool(entry.get("inDisease")),
+        })
 
     return {
-        "gene":         gene_symbol,
-        "species_taxid":species,
-        "total":        len(pathways),
-        "pathways":     pathways,
+        "gene": gene_symbol,
+        "species_taxid": species,
+        "total": len(pathways),
+        "pathways": pathways,
     }
 
 

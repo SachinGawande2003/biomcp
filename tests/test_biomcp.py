@@ -172,7 +172,7 @@ class TestCache:
         assert get_cache("pubmed") is get_cache("pubmed")
 
     def test_custom_ttl_applied(self):
-        from biomcp.utils import get_cache, CACHE_TTLS
+        from biomcp.utils import CACHE_TTLS, get_cache
 
         cache = get_cache("alphafold")
         assert cache.ttl == CACHE_TTLS["alphafold"]
@@ -181,6 +181,7 @@ class TestCache:
 class TestFormatters:
     def test_format_success_has_status(self):
         import json
+
         from biomcp.utils import format_success
 
         out = json.loads(format_success("my_tool", {"key": "value"}))
@@ -190,6 +191,7 @@ class TestFormatters:
 
     def test_format_error_has_status(self):
         import json
+
         from biomcp.utils import format_error
 
         out = json.loads(format_error("my_tool", ValueError("bad input")))
@@ -201,6 +203,7 @@ class TestFormatters:
 
     def test_format_error_includes_traceback_for_unexpected(self):
         import json
+
         from biomcp.utils import format_error
 
         out = json.loads(format_error("my_tool", RuntimeError("oops")))
@@ -250,6 +253,7 @@ class TestServer:
     @pytest.mark.asyncio
     async def test_dispatch_unknown_tool_returns_error(self):
         import json
+
         from biomcp.server import _dispatch
 
         result = json.loads(await _dispatch("nonexistent_tool", {}))
@@ -258,6 +262,7 @@ class TestServer:
     @pytest.mark.asyncio
     async def test_dispatch_validation_error_returns_structured_json(self):
         import json
+
         from biomcp.server import _dispatch
 
         # max_results=9999 exceeds limit — should return structured error, not raise
@@ -342,6 +347,7 @@ async def test_reactome_pathways_live():
     from biomcp.tools.pathways import get_reactome_pathways
 
     result = await get_reactome_pathways("EGFR")
+    assert result["total"] > 0
     assert "pathways" in result
 
 
