@@ -38,11 +38,12 @@ from biomcp.utils import (
 
 SERVER_NAME = "heuris-biomcp"
 SERVER_DISPLAY_NAME = "Heuris-BioMCP"
+MCP_SERVER_NAME = SERVER_DISPLAY_NAME
 STREAMABLE_HTTP_PATH = "/mcp"
 SSE_PATH = "/sse"
 MESSAGE_PATH = "/messages/"
 DEFAULT_SERVER_WEBSITE_URL = "https://heuris-biomcp.onrender.com"
-LOGO_ROUTE_PATH = "/logo.jpeg"
+LOGO_ROUTE_PATH = "/logo.png"
 _DEFAULT_CACHE_WARM_GENES = [
     "TP53",
     "EGFR",
@@ -127,8 +128,11 @@ def _server_icon_url() -> str:
 def _resolve_logo_path() -> str | None:
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     candidates = [
+        os.path.join(root_dir, "LOGO.png"),
         os.path.join(root_dir, "LOGO.jpeg"),
+        os.path.join(os.path.dirname(__file__), "LOGO.png"),
         os.path.join(os.path.dirname(__file__), "LOGO.jpeg"),
+        os.path.abspath("LOGO.png"),
         os.path.abspath("LOGO.jpeg"),
     ]
     for candidate in candidates:
@@ -2647,20 +2651,20 @@ def create_server() -> Server:
         from mcp.types import Icon
 
         server_kwargs["icons"] = [
-            Icon(src=_server_icon_url(), mimeType="image/jpeg", sizes=["512x512"])
+            Icon(src=_server_icon_url(), mimeType="image/png", sizes=["512x512"])
         ]
     except ImportError:
         pass
 
     try:
-        server = Server(SERVER_NAME, version=__version__, **server_kwargs)
+        server = Server(MCP_SERVER_NAME, version=__version__, **server_kwargs)
     except TypeError:
         server_kwargs.pop("icons", None)
         server_kwargs.pop("website_url", None)
         try:
-            server = Server(SERVER_NAME, version=__version__, **server_kwargs)
+            server = Server(MCP_SERVER_NAME, version=__version__, **server_kwargs)
         except TypeError:
-            server = Server(SERVER_NAME)
+            server = Server(MCP_SERVER_NAME)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -2761,7 +2765,8 @@ async def _run() -> None:
                 logo_path = _resolve_logo_path()
                 if logo_path is None:
                     return Response(status_code=404)
-                return FileResponse(logo_path, media_type="image/jpeg")
+                media_type = "image/png" if logo_path.lower().endswith(".png") else "image/jpeg"
+                return FileResponse(logo_path, media_type=media_type)
 
             @contextlib.asynccontextmanager
             async def lifespan(app: Starlette):
@@ -2775,6 +2780,7 @@ async def _run() -> None:
                 lifespan=lifespan,
                 routes=[
                     Route(LOGO_ROUTE_PATH, endpoint=handle_logo, methods=["GET"]),
+                    Route("/logo.jpeg", endpoint=handle_logo, methods=["GET"]),
                     Route("/health", endpoint=handle_health, methods=["GET"]),
                     Route("/healthz", endpoint=handle_health, methods=["GET"]),
                     Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
