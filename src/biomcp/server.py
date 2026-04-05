@@ -1070,20 +1070,25 @@ TOOLS: list[Tool] = [
     # ════════════════════════════════════════════════════════════════════
     _tool(
         "bulk_gene_analysis",
-        "Analyze multiple genes simultaneously in parallel and return a cross-gene "
-        "comparison matrix. Queries NCBI Gene, ChEMBL, Open Targets, and Reactome "
-        "for each gene, then synthesizes a comparative summary. Ideal for gene panel "
-        "analysis, gene family studies, and multi-target drug discovery.",
+        "Analyze one or two gene panels in parallel and return a cross-gene comparison "
+        "matrix. In differential mode it ranks pathways and diseases enriched in panel A "
+        "versus panel B using panel-level hit fractions and fold-change-style scoring.",
         {
             "gene_symbols": {
                 "type": "array", "items": {"type": "string"},
-                "description": "List of 2–10 HGNC gene symbols to analyze in parallel.",
+                "description": "Primary list of 2-10 HGNC gene symbols to analyze in parallel.",
             },
             "comparison_axes": {
                 "type": "array", "items": {"type": "string"},
                 "description": "Aspects to compare: 'drugs', 'diseases', 'pathways', 'expression'. "
                                "Default: all four.",
             },
+            "reference_gene_symbols": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Optional reference panel of 2-10 HGNC gene symbols for differential mode.",
+            },
+            "group_a_label": _str_prop("Display label for the primary panel in differential results."),
+            "group_b_label": _str_prop("Display label for the reference panel in differential results."),
         },
         ["gene_symbols"],
     ),
@@ -1325,16 +1330,24 @@ TOOLS = [
     _legacy_tool("verify_biological_claim"),
     _legacy_tool("search_cbio_mutations"),
     _legacy_tool("search_gwas_catalog"),
+    _legacy_tool("bulk_gene_analysis"),
     _tool(
         "session",
-        "Merged research-session workflow for entity resolution, knowledge-graph inspection, connection discovery, provenance export, and automated planning.",
+        "Merged research-session workflow for entity resolution, live graph inspection, persisted graph save/restore via MCP resources, provenance export, and automated planning.",
         {
-            "action": _enum_prop("Session workflow step.", ["resolve_entity", "knowledge_graph", "connections", "export", "plan"], "resolve_entity"),
+            "action": _enum_prop(
+                "Session workflow step.",
+                ["resolve_entity", "knowledge_graph", "connections", "export", "save", "restore", "saved_sessions", "plan"],
+                "resolve_entity",
+            ),
             "query": _str_prop("Entity query or planning goal."),
             "hint_type": _str_prop("Entity type hint used for resolution."),
             "goal": _str_prop("Explicit research goal for planning."),
             "depth": _enum_prop("Planning depth.", ["quick", "standard", "deep"], "standard"),
             "min_path_length": _int_prop("Minimum path length for unexpected connections.", 2, 1, 6),
+            "session_id": _str_prop("Saved session identifier used for restore or explicit save naming."),
+            "label": _str_prop("Human-readable label for saved sessions."),
+            "merge": _bool_prop("Merge a restored session into the current live graph instead of replacing it.", False),
         },
         ["action"],
     ),
@@ -1546,7 +1559,19 @@ _PUBLIC_TOOL_EXAMPLES: dict[str, list[dict[str, Any]]] = {
         {"gene_symbol": "TP53", "cancer_type": "breast cancer", "max_studies": 5}
     ],
     "search_gwas_catalog": [{"gene_symbol": "APOE", "max_results": 10}],
-    "session": [{"action": "resolve_entity", "query": "EGFR", "hint_type": "gene"}],
+    "bulk_gene_analysis": [
+        {
+            "gene_symbols": ["EGFR", "ERBB2", "MET"],
+            "reference_gene_symbols": ["BRCA1", "BRCA2", "PALB2"],
+            "group_a_label": "tumor_panel",
+            "group_b_label": "reference_panel",
+            "comparison_axes": ["diseases", "pathways"],
+        }
+    ],
+    "session": [
+        {"action": "resolve_entity", "query": "EGFR", "hint_type": "gene"},
+        {"action": "save", "label": "egfr-investigation"},
+    ],
     "drug_interaction_checker": [
         {"drug_name": "warfarin", "co_medications": ["amiodarone", "fluconazole"]}
     ],
@@ -1577,6 +1602,7 @@ _PUBLIC_TOOL_EXAMPLES: dict[str, list[dict[str, Any]]] = {
 
 _RESOURCE_CAPABILITIES_URI = "biomcp://server/capabilities"
 _RESOURCE_TOOL_CATALOG_URI = "biomcp://tools/catalog"
+_RESOURCE_SESSION_PREFIX = "biomcp://session/"
 _RESOURCE_METADATA: dict[str, dict[str, str]] = {
     _RESOURCE_CAPABILITIES_URI: {
         "name": "server-capabilities",
@@ -1611,8 +1637,33 @@ def _tool_catalog_entries() -> list[dict[str, Any]]:
     ]
 
 
+def _saved_session_resource_definitions() -> list[Resource]:
+    from biomcp.core.knowledge_graph import list_saved_sessions
+
+    definitions: list[Resource] = []
+    for session in list_saved_sessions():
+        session_id = session["session_id"]
+        label = session.get("label") or session_id
+        saved_at = session.get("saved_at", "")
+        definitions.append(
+            Resource(
+                name=f"session-{session_id}",
+                title=f"Saved Session: {label}",
+                uri=session.get("resource_uri", f"{_RESOURCE_SESSION_PREFIX}{session_id}"),
+                description=(
+                    f"Persisted session knowledge graph snapshot from {saved_at}."
+                    if saved_at
+                    else "Persisted session knowledge graph snapshot."
+                ),
+                mimeType="application/json",
+            )
+        )
+    return definitions
+
+
 def _resource_payload(uri: str) -> dict[str, Any]:
     if uri == _RESOURCE_CAPABILITIES_URI:
+        resource_uris = sorted(str(resource.uri) for resource in _list_resource_definitions())
         return {
             "service": SERVER_NAME,
             "display_name": SERVER_DISPLAY_NAME,
@@ -1625,7 +1676,7 @@ def _resource_payload(uri: str) -> dict[str, Any]:
             },
             "health_endpoints": ["/health", "/healthz", "/readyz", "/tool-health"],
             "public_tool_count": len(TOOLS),
-            "resource_uris": sorted(_RESOURCE_METADATA),
+            "resource_uris": resource_uris,
             "capabilities": _build_capability_status(),
         }
     if uri == _RESOURCE_TOOL_CATALOG_URI:
@@ -1635,11 +1686,18 @@ def _resource_payload(uri: str) -> dict[str, Any]:
             "tool_count": len(TOOLS),
             "tools": _tool_catalog_entries(),
         }
+    if uri.startswith(_RESOURCE_SESSION_PREFIX):
+        from biomcp.core.knowledge_graph import load_saved_session
+
+        session_id = uri.removeprefix(_RESOURCE_SESSION_PREFIX)
+        if not session_id:
+            raise ValueError("Session resource URI must include a session id.")
+        return load_saved_session(session_id)
     raise ValueError(f"Unknown resource '{uri}'")
 
 
 def _list_resource_definitions() -> list[Resource]:
-    return [
+    static_resources = [
         Resource(
             name=meta["name"],
             title=meta["title"],
@@ -1649,6 +1707,7 @@ def _list_resource_definitions() -> list[Resource]:
         )
         for uri, meta in _RESOURCE_METADATA.items()
     ]
+    return static_resources + _saved_session_resource_definitions()
 
 
 def _read_resource_contents(uri: Any) -> list[ReadResourceContents]:
@@ -1753,6 +1812,49 @@ async def _export_research_session() -> dict[str, Any]:
     return skg.export_provenance()
 
 
+async def _save_research_session(
+    session_id: str = "",
+    label: str = "",
+) -> dict[str, Any]:
+    from biomcp.core.knowledge_graph import save_current_session
+
+    payload = await save_current_session(session_id=session_id, label=label)
+    return {
+        "session_id": payload["session_id"],
+        "label": payload.get("label", ""),
+        "saved_at": payload["saved_at"],
+        "resource_uri": payload["resource_uri"],
+        "graph_summary": payload["graph_snapshot"]["summary"],
+    }
+
+
+async def _restore_research_session(
+    session_id: str,
+    merge: bool = False,
+) -> dict[str, Any]:
+    from biomcp.core.knowledge_graph import restore_saved_session
+
+    restored = await restore_saved_session(session_id=session_id, merge=merge)
+    return {
+        "restored_session_id": restored["session_id"],
+        "label": restored.get("label", ""),
+        "saved_at": restored.get("saved_at", ""),
+        "resource_uri": restored["resource_uri"],
+        "merge": restored["merge"],
+        "graph_stats": restored["graph_stats"],
+    }
+
+
+async def _list_saved_research_sessions() -> dict[str, Any]:
+    from biomcp.core.knowledge_graph import list_saved_sessions
+
+    sessions = list_saved_sessions()
+    return {
+        "saved_session_count": len(sessions),
+        "sessions": sessions,
+    }
+
+
 async def _plan_and_execute_research(
     goal: str,
     depth: str = "standard",
@@ -1824,6 +1926,9 @@ async def _session_workflow(
     goal: str = "",
     depth: str = "standard",
     min_path_length: int = 2,
+    session_id: str = "",
+    label: str = "",
+    merge: bool = False,
 ) -> dict[str, Any]:
     action = action.lower()
     if action == "resolve_entity":
@@ -1836,6 +1941,14 @@ async def _session_workflow(
         return await _find_biological_connections(min_path_length=min_path_length)
     if action == "export":
         return await _export_research_session()
+    if action == "save":
+        return await _save_research_session(session_id=session_id, label=label)
+    if action == "restore":
+        if not session_id:
+            raise ValueError("session_id is required when action='restore'.")
+        return await _restore_research_session(session_id=session_id, merge=merge)
+    if action == "saved_sessions":
+        return await _list_saved_research_sessions()
     if action == "plan":
         plan_goal = goal or query
         if not plan_goal:

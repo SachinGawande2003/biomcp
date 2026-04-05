@@ -384,24 +384,24 @@ class AdaptiveQueryPlanner:
         elapsed = round(time.monotonic() - t_start, 2)
 
         # Build integrated report
+        execution_summary = plan.summary()
         report = {
             "goal":              plan.goal,
             "strategy":          plan.strategy,
             "depth":             plan.depth,
             "total_elapsed_s":   elapsed,
-            "execution_summary": plan.summary(),
+            "execution_summary": execution_summary,
             "results":           all_results,
             "insights":          self._synthesize_insights(plan, all_results),
         }
         if progress_callback is not None:
-            summary = report["execution_summary"]
             await progress_callback(
                 "plan_completed",
                 {
                     "goal": plan.goal,
-                    "completed": summary["completed"],
-                    "failed": summary["failed"],
-                    "total_steps": summary["total_steps"],
+                    "completed": execution_summary["completed"],
+                    "failed": execution_summary["failed"],
+                    "total_steps": execution_summary["total_steps"],
                     "elapsed_s": elapsed,
                 },
             )

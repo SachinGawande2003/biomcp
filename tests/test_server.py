@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -49,6 +52,7 @@ TOOL_IMPLEMENTATIONS = {
     "verify_biological_claim": ("biomcp.tools.verify", "verify_biological_claim"),
     "search_cbio_mutations": ("biomcp.tools.databases", "search_cbio_mutations"),
     "search_gwas_catalog": ("biomcp.tools.databases", "search_gwas_catalog"),
+    "bulk_gene_analysis": ("biomcp.tools.innovations", "bulk_gene_analysis"),
     "session": ("biomcp.server", "_session_workflow"),
     "drug_interaction_checker": ("biomcp.tools.strategy_surface", "drug_interaction_checker"),
     "protein_binding_pocket": ("biomcp.tools.strategy_surface", "protein_binding_pocket"),
@@ -138,6 +142,7 @@ class TestToolRegistry:
             "verify_biological_claim",
             "search_cbio_mutations",
             "search_gwas_catalog",
+            "bulk_gene_analysis",
             "session",
             "drug_interaction_checker",
             "protein_binding_pocket",
@@ -181,7 +186,6 @@ class TestToolRegistry:
             "find_research_gaps",
             "validate_reasoning_chain",
             "generate_experimental_protocol",
-            "bulk_gene_analysis",
             "compute_pathway_enrichment",
             "analyze_coexpression",
             "predict_splice_impact",
@@ -257,6 +261,43 @@ class TestMCPResources:
         assert payload["transport_endpoints"]["streamable_http"] == "/mcp"
         assert payload["transport_endpoints"]["sse"] == "/sse"
         assert "/readyz" in payload["health_endpoints"]
+
+    @pytest.mark.asyncio
+    async def test_session_resources_are_listed_after_save(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from biomcp.core import knowledge_graph as knowledge_graph_module
+
+        temp_dir = Path(".codex_test_tmp") / f"server-{uuid4().hex}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("BIOMCP_SESSION_STORE_DIR", str(temp_dir))
+
+        try:
+            knowledge_graph_module.reset_skg()
+
+            skg = await knowledge_graph_module.get_skg()
+            await skg.upsert_node("EGFR", knowledge_graph_module.NodeType.GENE, source="ncbi")
+
+            saved = await server_module._session_workflow(action="save", label="EGFR session")
+            resources = _list_resource_definitions()
+            uris = {str(resource.uri) for resource in resources}
+            assert saved["resource_uri"] in uris
+
+            payload = json.loads(_read_resource_contents(saved["resource_uri"])[0].content)
+            assert payload["session_id"] == saved["session_id"]
+            assert payload["graph_snapshot"]["summary"]["total_nodes"] == 1
+
+            knowledge_graph_module.reset_skg()
+            restored = await server_module._session_workflow(
+                action="restore",
+                session_id=saved["session_id"],
+            )
+            assert restored["restored_session_id"] == saved["session_id"]
+            assert restored["graph_stats"]["nodes"] == 1
+        finally:
+            knowledge_graph_module.reset_skg()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestDispatchSmoke:

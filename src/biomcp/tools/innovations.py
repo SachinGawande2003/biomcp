@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+from collections import defaultdict
 from typing import Any
 
 from loguru import logger
@@ -42,27 +43,114 @@ _CBIO_BASE    = "https://www.cbioportal.org/api"
 # 1. bulk_gene_analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _dedupe_gene_symbols(gene_symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for gene in gene_symbols:
+        if gene not in seen:
+            seen.add(gene)
+            ordered.append(gene)
+    return ordered
+
+
+def _feature_membership(
+    per_gene: dict[str, dict[str, Any]],
+    feature_key: str,
+) -> dict[str, set[str]]:
+    membership: dict[str, set[str]] = defaultdict(set)
+    for gene, data in per_gene.items():
+        for feature in data.get(feature_key, []):
+            if feature:
+                membership[feature].add(gene)
+    return dict(membership)
+
+
+def _rank_differential_features(
+    primary_per_gene: dict[str, dict[str, Any]],
+    reference_per_gene: dict[str, dict[str, Any]],
+    feature_key: str,
+    feature_label: str,
+    group_a_label: str,
+    group_b_label: str,
+) -> dict[str, Any]:
+    membership_a = _feature_membership(primary_per_gene, feature_key)
+    membership_b = _feature_membership(reference_per_gene, feature_key)
+    all_features = sorted(set(membership_a) | set(membership_b))
+    if not all_features:
+        return {
+            'feature_type': feature_label,
+            'group_a_label': group_a_label,
+            'group_b_label': group_b_label,
+            'all_ranked': [],
+            'group_a_enriched': [],
+            'group_b_enriched': [],
+        }
+
+    size_a = max(len(primary_per_gene), 1)
+    size_b = max(len(reference_per_gene), 1)
+    pseudocount = 1.0 / max(size_a, size_b)
+    ranked: list[dict[str, Any]] = []
+
+    for feature in all_features:
+        genes_a = sorted(membership_a.get(feature, set()))
+        genes_b = sorted(membership_b.get(feature, set()))
+        hits_a = len(genes_a)
+        hits_b = len(genes_b)
+        fraction_a = hits_a / size_a
+        fraction_b = hits_b / size_b
+        fold_change = (fraction_a + pseudocount) / (fraction_b + pseudocount)
+        log2_fold_change = math.log2(fold_change)
+        fraction_delta = fraction_a - fraction_b
+
+        ranked.append({
+            feature_label: feature,
+            'group_a_hits': hits_a,
+            'group_b_hits': hits_b,
+            'group_a_fraction': round(fraction_a, 4),
+            'group_b_fraction': round(fraction_b, 4),
+            'fraction_delta': round(fraction_delta, 4),
+            'fold_change': round(fold_change, 4),
+            'log2_fold_change': round(log2_fold_change, 4),
+            'group_a_genes': genes_a,
+            'group_b_genes': genes_b,
+            'enriched_in': (
+                group_a_label if fraction_delta > 0 else group_b_label if fraction_delta < 0 else 'balanced'
+            ),
+        })
+
+    ranked.sort(
+        key=lambda item: (
+            abs(item['fraction_delta']),
+            abs(item['log2_fold_change']),
+            item['group_a_hits'] + item['group_b_hits'],
+            item[feature_label],
+        ),
+        reverse=True,
+    )
+
+    return {
+        'feature_type': feature_label,
+        'group_a_label': group_a_label,
+        'group_b_label': group_b_label,
+        'all_ranked': ranked[:25],
+        'group_a_enriched': [item for item in ranked if item['fraction_delta'] > 0][:10],
+        'group_b_enriched': [item for item in ranked if item['fraction_delta'] < 0][:10],
+    }
+
+
 async def bulk_gene_analysis(
-    gene_symbols:       list[str],
-    comparison_axes:    list[str] | None = None,
+    gene_symbols: list[str],
+    comparison_axes: list[str] | None = None,
+    reference_gene_symbols: list[str] | None = None,
+    group_a_label: str = 'group_a',
+    group_b_label: str = 'group_b',
 ) -> dict[str, Any]:
     """
-    Analyze multiple genes in parallel and return a cross-gene comparison matrix.
+    Analyze one or two gene panels in parallel and return a comparative summary.
 
-    Fires NCBI Gene + ChEMBL + Open Targets + Reactome for each gene
-    simultaneously, then synthesizes a comparative summary.
-
-    Args:
-        gene_symbols:    2–10 HGNC gene symbols.
-        comparison_axes: Aspects to compare: 'drugs', 'diseases', 'pathways', 'expression'.
-
-    Returns:
-        {
-          genes_analyzed,
-          per_gene: {gene: {ncbi, drug_count, disease_count, pathways}},
-          comparison_matrix: {by_disease, by_pathway, by_drug_class},
-          shared_biology, unique_features, cross_target_opportunities
-        }
+    When only gene_symbols is provided, this behaves as the original descriptive
+    panel comparison. When reference_gene_symbols is also provided, the function
+    computes differential disease and pathway rankings between the two panels.
     """
     from biomcp.tools.ncbi import get_gene_info
     from biomcp.tools.pathways import (
@@ -72,102 +160,161 @@ async def bulk_gene_analysis(
     )
 
     if not gene_symbols or len(gene_symbols) < 2:
-        raise ValueError("Provide at least 2 gene symbols for bulk analysis.")
+        raise ValueError('Provide at least 2 gene symbols for bulk analysis.')
     if len(gene_symbols) > 10:
-        raise ValueError("Maximum 10 genes per bulk analysis to avoid rate limiting.")
+        raise ValueError('Maximum 10 genes per bulk analysis to avoid rate limiting.')
+    if reference_gene_symbols and len(reference_gene_symbols) < 2:
+        raise ValueError('Provide at least 2 genes in reference_gene_symbols for differential mode.')
+    if reference_gene_symbols and len(reference_gene_symbols) > 10:
+        raise ValueError('Maximum 10 genes per reference panel to avoid rate limiting.')
 
-    axes = set(comparison_axes or ["drugs", "diseases", "pathways", "expression"])
-    validated = [BioValidator.validate_gene_symbol(g) for g in gene_symbols]
+    axes = set(comparison_axes or ['drugs', 'diseases', 'pathways', 'expression'])
+    validated_primary = _dedupe_gene_symbols(
+        [BioValidator.validate_gene_symbol(g) for g in gene_symbols]
+    )
+    validated_reference = _dedupe_gene_symbols(
+        [BioValidator.validate_gene_symbol(g) for g in (reference_gene_symbols or [])]
+    )
+    validated = validated_primary + [g for g in validated_reference if g not in validated_primary]
 
     async def _analyze_gene(gene: str) -> dict[str, Any]:
         tasks: list[Any] = [asyncio.create_task(get_gene_info(gene))]
-        if "drugs" in axes:
+        if 'drugs' in axes:
             tasks.append(asyncio.create_task(get_drug_targets(gene, max_results=10)))
-        if "diseases" in axes:
-            tasks.append(asyncio.create_task(get_gene_disease_associations(gene, max_results=8)))
-        if "pathways" in axes:
+        if 'diseases' in axes:
+            tasks.append(asyncio.create_task(get_gene_disease_associations(gene, max_results=12)))
+        if 'pathways' in axes:
             tasks.append(asyncio.create_task(get_reactome_pathways(gene)))
 
         raw = await asyncio.gather(*tasks, return_exceptions=True)
-        result: dict[str, Any] = {"gene": gene}
+        result: dict[str, Any] = {'gene': gene}
 
-        result["ncbi"]    = raw[0] if not isinstance(raw[0], Exception) else {}
+        result['ncbi'] = raw[0] if not isinstance(raw[0], Exception) else {}
         idx = 1
-        if "drugs" in axes:
-            dr = raw[idx] if not isinstance(raw[idx], Exception) else {}
-            result["drug_count"]   = len(dr.get("drugs", []))
-            result["top_drugs"]    = [d.get("molecule_name", "") for d in dr.get("drugs", [])[:3]]
+        if 'drugs' in axes:
+            drug_payload = raw[idx] if not isinstance(raw[idx], Exception) else {}
+            result['drug_count'] = len(drug_payload.get('drugs', []))
+            result['top_drugs'] = [
+                drug.get('molecule_name', '')
+                for drug in drug_payload.get('drugs', [])[:3]
+            ]
             idx += 1
-        if "diseases" in axes:
-            di = raw[idx] if not isinstance(raw[idx], Exception) else {}
-            result["disease_count"] = di.get("total_associations", 0)
-            result["top_diseases"]  = [a.get("disease_name", "") for a in di.get("associations", [])[:3]]
+        if 'diseases' in axes:
+            disease_payload = raw[idx] if not isinstance(raw[idx], Exception) else {}
+            disease_names = [
+                association.get('disease_name', '')
+                for association in disease_payload.get('associations', [])
+                if association.get('disease_name')
+            ]
+            result['disease_count'] = disease_payload.get('total_associations', len(disease_names))
+            result['all_diseases'] = disease_names
+            result['top_diseases'] = disease_names[:3]
             idx += 1
-        if "pathways" in axes:
-            pw = raw[idx] if not isinstance(raw[idx], Exception) else {}
-            result["pathway_count"] = pw.get("total", 0)
-            result["top_pathways"]  = [p.get("name", "") for p in pw.get("pathways", [])[:3]]
+        if 'pathways' in axes:
+            pathway_payload = raw[idx] if not isinstance(raw[idx], Exception) else {}
+            pathway_names = [
+                pathway.get('name', '')
+                for pathway in pathway_payload.get('pathways', [])
+                if pathway.get('name')
+            ]
+            result['pathway_count'] = pathway_payload.get('total', len(pathway_names))
+            result['all_pathways'] = pathway_names
+            result['top_pathways'] = pathway_names[:3]
         return result
 
-    # Fire all gene analyses in parallel
     per_gene_raw = await asyncio.gather(
-        *[_analyze_gene(g) for g in validated],
+        *[_analyze_gene(gene) for gene in validated],
         return_exceptions=True,
     )
-    per_gene: dict[str, dict] = {}
+    per_gene: dict[str, dict[str, Any]] = {}
     for item in per_gene_raw:
         if isinstance(item, Exception):
-            logger.warning(f"[BulkGene] Analysis failed: {item}")
+            logger.warning(f'[BulkGene] Analysis failed: {item}')
         elif isinstance(item, dict):
-            per_gene[item["gene"]] = item
+            per_gene[item['gene']] = item
 
-    # ── Cross-gene comparison ─────────────────────────────────────────────────
-    # Find shared diseases
-    all_diseases: dict[str, set[str]] = {}
-    for gene, data in per_gene.items():
-        for d in data.get("top_diseases", []):
-            if d:
-                all_diseases.setdefault(d, set()).add(gene)
-
-    shared_diseases = {d: list(genes) for d, genes in all_diseases.items()
-                       if len(genes) >= 2}
-
-    # Find shared pathways
-    all_pathways: dict[str, set[str]] = {}
-    for gene, data in per_gene.items():
-        for p in data.get("top_pathways", []):
-            if p:
-                all_pathways.setdefault(p, set()).add(gene)
-
-    shared_pathways = {p: list(genes) for p, genes in all_pathways.items()
-                       if len(genes) >= 2}
-
-    # Drug count ranking
-    drug_ranking = sorted(
-        [(g, d.get("drug_count", 0)) for g, d in per_gene.items()],
-        key=lambda x: x[1], reverse=True
-    )
-
-    return {
-        "genes_analyzed":   validated,
-        "analysis_axes":    list(axes),
-        "per_gene":         per_gene,
-        "comparison_matrix": {
-            "shared_diseases":       shared_diseases,
-            "shared_pathways":       shared_pathways,
-            "drug_target_ranking":   [{"gene": g, "compound_count": c} for g, c in drug_ranking],
-        },
-        "cross_target_opportunities": [
-            f"Genes {' & '.join(genes)} share disease '{disease}' — potential combination target"
-            for disease, genes in list(shared_diseases.items())[:5]
-        ],
-        "methodology": "Parallel queries to NCBI Gene, ChEMBL, Open Targets, Reactome per gene.",
+    all_diseases = _feature_membership(per_gene, 'all_diseases')
+    shared_diseases = {
+        disease: sorted(genes)
+        for disease, genes in all_diseases.items()
+        if len(genes) >= 2
     }
 
+    all_pathways = _feature_membership(per_gene, 'all_pathways')
+    shared_pathways = {
+        pathway: sorted(genes)
+        for pathway, genes in all_pathways.items()
+        if len(genes) >= 2
+    }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. compute_pathway_enrichment
-# ─────────────────────────────────────────────────────────────────────────────
+    drug_ranking = sorted(
+        [(gene, data.get('drug_count', 0)) for gene, data in per_gene.items()],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+
+    differential_analysis: dict[str, Any] | None = None
+    if validated_reference:
+        primary_per_gene = {gene: per_gene[gene] for gene in validated_primary if gene in per_gene}
+        reference_per_gene = {
+            gene: per_gene[gene] for gene in validated_reference if gene in per_gene
+        }
+        differential_analysis = {
+            'group_a': {
+                'label': group_a_label,
+                'genes': validated_primary,
+                'genes_with_results': sorted(primary_per_gene),
+            },
+            'group_b': {
+                'label': group_b_label,
+                'genes': validated_reference,
+                'genes_with_results': sorted(reference_per_gene),
+            },
+            'pathways': _rank_differential_features(
+                primary_per_gene,
+                reference_per_gene,
+                'all_pathways',
+                'pathway',
+                group_a_label,
+                group_b_label,
+            ),
+            'diseases': _rank_differential_features(
+                primary_per_gene,
+                reference_per_gene,
+                'all_diseases',
+                'disease',
+                group_a_label,
+                group_b_label,
+            ),
+        }
+
+    return {
+        'mode': 'differential_panel_analysis' if validated_reference else 'comparative_summary',
+        'genes_analyzed': validated,
+        'primary_genes': validated_primary,
+        'reference_genes': validated_reference,
+        'analysis_axes': list(axes),
+        'per_gene': per_gene,
+        'comparison_matrix': {
+            'shared_diseases': shared_diseases,
+            'shared_pathways': shared_pathways,
+            'drug_target_ranking': [
+                {'gene': gene, 'compound_count': count}
+                for gene, count in drug_ranking
+            ],
+        },
+        'differential_analysis': differential_analysis,
+        'cross_target_opportunities': [
+            f"Genes {' & '.join(genes)} share disease '{disease}' - potential combination target"
+            for disease, genes in list(shared_diseases.items())[:5]
+        ],
+        'methodology': (
+            'Parallel per-gene queries to NCBI Gene, ChEMBL, Open Targets, and Reactome. '
+            'When reference_gene_symbols is supplied, diseases and pathways are ranked by '
+            'panel-level hit fractions and pseudocount-smoothed fold change.'
+        ),
+    }
+
 
 @cached("enrichment")
 @rate_limited("default")

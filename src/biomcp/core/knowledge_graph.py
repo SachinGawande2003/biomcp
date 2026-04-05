@@ -11,10 +11,13 @@ Fixes applied:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -355,6 +358,40 @@ class SessionKnowledgeGraph:
             "timestamp": time.time(),
         })
 
+    async def export_state(self) -> dict[str, Any]:
+        async with self._lock:
+            return {
+                "format_version": 1,
+                "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "nodes": [
+                    {
+                        "node_id": node.node_id,
+                        "node_type": node.node_type.value,
+                        "label": node.label,
+                        "properties": node.properties,
+                        "aliases": node.aliases,
+                        "sources": node.sources,
+                        "created_at": node.created_at,
+                        "confidence": node.confidence,
+                    }
+                    for node in self._nodes.values()
+                ],
+                "edges": [
+                    {
+                        "edge_id": edge.edge_id,
+                        "edge_type": edge.edge_type.value,
+                        "source_id": edge.source_id,
+                        "target_id": edge.target_id,
+                        "properties": edge.properties,
+                        "evidence": edge.evidence,
+                        "score": edge.score,
+                        "created_at": edge.created_at,
+                    }
+                    for edge in self._edges.values()
+                ],
+                "tool_calls": list(self._tool_calls),
+            }
+
     def snapshot(self) -> dict[str, Any]:
         nodes_by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for node in self._nodes.values():
@@ -410,6 +447,79 @@ class SessionKnowledgeGraph:
             "calls": len(self._tool_calls),
         }
 
+    async def restore_state(self, payload: dict[str, Any], *, merge: bool = False) -> dict[str, int]:
+        state = payload.get("graph_state", payload)
+        nodes = state.get("nodes", [])
+        edges = state.get("edges", [])
+        tool_calls = state.get("tool_calls", [])
+
+        async with self._lock:
+            if not merge:
+                self._clear_unlocked()
+
+            for raw_node in nodes:
+                node_type = NodeType(raw_node["node_type"])
+                node = SKGNode(
+                    node_id=raw_node["node_id"],
+                    node_type=node_type,
+                    label=raw_node["label"],
+                    properties=dict(raw_node.get("properties", {})),
+                    aliases=list(raw_node.get("aliases", [])),
+                    sources=list(raw_node.get("sources", [])),
+                    created_at=float(raw_node.get("created_at", time.monotonic())),
+                    confidence=float(raw_node.get("confidence", 1.0)),
+                )
+                self._nodes[node.node_id] = node
+
+            for raw_edge in edges:
+                edge_type = EdgeType(raw_edge["edge_type"])
+                edge = SKGEdge(
+                    edge_id=raw_edge["edge_id"],
+                    edge_type=edge_type,
+                    source_id=raw_edge["source_id"],
+                    target_id=raw_edge["target_id"],
+                    properties=dict(raw_edge.get("properties", {})),
+                    evidence=list(raw_edge.get("evidence", [])),
+                    score=float(raw_edge.get("score", 1.0)),
+                    created_at=float(raw_edge.get("created_at", time.monotonic())),
+                )
+                self._edges[edge.edge_id] = edge
+
+            if merge:
+                self._tool_calls.extend(tool_calls)
+            else:
+                self._tool_calls = list(tool_calls)
+
+            self._rebuild_indexes_unlocked()
+            return self.stats()
+
+    def _clear_unlocked(self) -> None:
+        self._nodes.clear()
+        self._edges.clear()
+        self._label_index.clear()
+        self._alias_index.clear()
+        self._type_index = defaultdict(set)
+        self._adj_out = defaultdict(list)
+        self._adj_in = defaultdict(list)
+        self._tool_calls = []
+
+    def _rebuild_indexes_unlocked(self) -> None:
+        self._label_index.clear()
+        self._alias_index.clear()
+        self._type_index = defaultdict(set)
+        self._adj_out = defaultdict(list)
+        self._adj_in = defaultdict(list)
+
+        for node in self._nodes.values():
+            self._label_index[node.label.lower()] = node.node_id
+            self._type_index[node.node_type].add(node.node_id)
+            for alias in node.aliases:
+                self._alias_index[alias.lower()] = node.node_id
+
+        for edge in self._edges.values():
+            self._adj_out[edge.source_id].append(edge.edge_id)
+            self._adj_in[edge.target_id].append(edge.edge_id)
+
 
 # ── FIX: Lazy singleton — no module-level asyncio.Lock() ─────────────────────
 _SKG: SessionKnowledgeGraph | None = None
@@ -437,6 +547,101 @@ def reset_skg() -> None:
     global _SKG, _SKG_LOCK
     _SKG = None
     _SKG_LOCK = None
+
+
+_SESSION_ID_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+
+
+def _session_store_dir() -> Path:
+    configured = os.getenv("BIOMCP_SESSION_STORE_DIR")
+    if configured:
+        directory = Path(configured)
+    else:
+        directory = Path(__file__).resolve().parents[3] / ".biomcp_sessions"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _validate_session_id(session_id: str) -> str:
+    cleaned = session_id.strip()
+    if not cleaned:
+        raise ValueError("session_id is required.")
+    if any(ch not in _SESSION_ID_CHARS for ch in cleaned):
+        raise ValueError("session_id may only contain letters, numbers, '-' and '_'.")
+    return cleaned
+
+
+def _make_session_id() -> str:
+    timestamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+    return f"session-{timestamp}-{uuid4().hex[:6]}"
+
+
+def _session_path(session_id: str) -> Path:
+    return _session_store_dir() / f"{_validate_session_id(session_id)}.json"
+
+
+def list_saved_sessions() -> list[dict[str, Any]]:
+    sessions: list[dict[str, Any]] = []
+    for path in sorted(_session_store_dir().glob("*.json"), reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(f"[SKG] Skipping unreadable saved session '{path.name}': {exc}")
+            continue
+
+        summary = payload.get("graph_snapshot", {}).get("summary", {})
+        sessions.append({
+            "session_id": payload.get("session_id", path.stem),
+            "label": payload.get("label", ""),
+            "saved_at": payload.get("saved_at", ""),
+            "resource_uri": payload.get("resource_uri", f"biomcp://session/{path.stem}"),
+            "summary": summary,
+        })
+    return sessions
+
+
+def load_saved_session(session_id: str) -> dict[str, Any]:
+    path = _session_path(session_id)
+    if not path.exists():
+        raise LookupError(f"Saved session '{session_id}' was not found.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+async def save_current_session(session_id: str = "", label: str = "") -> dict[str, Any]:
+    skg = await get_skg()
+    resolved_session_id = _validate_session_id(session_id) if session_id else _make_session_id()
+    graph_state = await skg.export_state()
+    graph_snapshot = skg.snapshot()
+    provenance = skg.export_provenance()
+    saved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload = {
+        "session_id": resolved_session_id,
+        "label": label.strip(),
+        "saved_at": saved_at,
+        "resource_uri": f"biomcp://session/{resolved_session_id}",
+        "graph_snapshot": graph_snapshot,
+        "provenance": provenance,
+        "graph_state": graph_state,
+    }
+    _session_path(resolved_session_id).write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    return payload
+
+
+async def restore_saved_session(session_id: str, *, merge: bool = False) -> dict[str, Any]:
+    payload = load_saved_session(session_id)
+    skg = await get_skg()
+    stats = await skg.restore_state(payload["graph_state"], merge=merge)
+    return {
+        "session_id": payload["session_id"],
+        "label": payload.get("label", ""),
+        "saved_at": payload.get("saved_at", ""),
+        "resource_uri": payload.get("resource_uri", f"biomcp://session/{payload['session_id']}"),
+        "merge": merge,
+        "graph_stats": stats,
+    }
 
 
 def auto_index(extractor_fn: Any) -> Any:
