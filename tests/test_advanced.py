@@ -73,7 +73,7 @@ async def test_search_clinical_trials_retries_after_403(mock_http_client, mock_h
     assert result["total_found"] == 0
     assert result["studies"] == []
     assert mock_http_client.get.await_count == 2
-    sleep_mock.assert_awaited_once_with(60)
+    sleep_mock.assert_awaited_once_with(2.0)
 
 
 @pytest.mark.asyncio
@@ -114,7 +114,28 @@ async def test_get_trial_details_retries_after_403(mock_http_client, mock_http_r
     assert result["nct_id"] == "NCT04280705"
     assert result["primary_outcomes"][0]["measure"] == "ORR"
     assert mock_http_client.get.await_count == 2
-    sleep_mock.assert_awaited_once_with(60)
+    sleep_mock.assert_awaited_once_with(2.0)
+
+
+@pytest.mark.asyncio
+async def test_clinical_trials_retry_uses_exponential_backoff(mock_http_client, mock_http_response):
+    rate_limited = mock_http_response(status_code=403)
+    success = mock_http_response(json_data={"totalCount": 0, "studies": []})
+    mock_http_client.get = AsyncMock(side_effect=[rate_limited, rate_limited, success])
+
+    with (
+        patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client),
+        patch("biomcp.tools.advanced.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+    ):
+        from biomcp.tools.advanced import search_clinical_trials
+
+        result = await search_clinical_trials.__wrapped__.__wrapped__.__wrapped__(
+            "EGFR lung cancer", max_results=5
+        )
+
+    assert result["total_found"] == 0
+    assert mock_http_client.get.await_count == 3
+    assert [call.args[0] for call in sleep_mock.await_args_list] == [2.0, 4.0]
 
 
 @pytest.mark.asyncio
@@ -130,6 +151,40 @@ async def test_search_gene_expression_empty(mock_http_client, mock_http_response
 
     assert result["datasets"] == []
     assert result["total_found"] == 0   # FIX: was result["total"]
+
+
+@pytest.mark.asyncio
+async def test_search_gene_expression_uses_taxon_when_organism_is_missing(
+    mock_http_client,
+    mock_http_response,
+):
+    search_resp = mock_http_response(
+        json_data={"esearchresult": {"idlist": ["1"], "count": "1"}}
+    )
+    summary_resp = mock_http_response(
+        json_data={
+            "result": {
+                "1": {
+                    "accession": "GSE12345",
+                    "title": "EGFR expression study",
+                    "summary": "Expression profiling.",
+                    "taxon": "Homo sapiens",
+                    "gpl": "GPL570",
+                    "n_samples": 24,
+                    "pubmedids": ["12345678"],
+                }
+            }
+        }
+    )
+    mock_http_client.get = AsyncMock(side_effect=[search_resp, summary_resp])
+
+    with patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client):
+        from biomcp.tools.advanced import search_gene_expression
+
+        result = await search_gene_expression.__wrapped__.__wrapped__.__wrapped__("EGFR")
+
+    assert result["datasets"][0]["geo_accession"] == "GSE12345"
+    assert result["datasets"][0]["organism"] == "Homo sapiens"
 
 
 @pytest.mark.asyncio

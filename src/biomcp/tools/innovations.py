@@ -47,7 +47,33 @@ _CBIO_BASE    = "https://www.cbioportal.org/api"
 
 
 def _normalize_interpro_protein_accession(value: str) -> str:
-    return value.strip().upper().split("-")[0]
+    normalized = value.strip().upper()
+    if not normalized:
+        return ""
+    if ":" in normalized:
+        normalized = normalized.split(":")[-1]
+    if "|" in normalized:
+        for token in reversed(normalized.split("|")):
+            token = token.strip()
+            if token:
+                normalized = token
+                break
+    return normalized.split("-")[0]
+
+
+def _interpro_protein_accession_candidates(protein: dict[str, Any]) -> set[str]:
+    candidates: set[str] = set()
+    for key in (
+        "accession",
+        "uniprot_accession",
+        "protein_accession",
+        "identifier",
+        "id",
+    ):
+        normalized = _normalize_interpro_protein_accession(str(protein.get(key, "")))
+        if normalized:
+            candidates.add(normalized)
+    return candidates
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -647,35 +673,50 @@ async def get_protein_domain_structure(
 
         # Get positional data
         proteins = entry.get("proteins", [])
-        for prot in proteins:
-            prot_acc = _normalize_interpro_protein_accession(
-                str(prot.get("accession") or prot.get("uniprot_accession") or "")
-            )
-            if prot_acc != accession:
-                continue
-            for loc in prot.get("entry_protein_locations", []):
-                for frag in loc.get("fragments", []):
-                    start = frag.get("start", 0)
-                    end   = frag.get("end", 0)
-                    length = end - start + 1
-                    covered_fragments.append((start, end))
+        matched_protein = None
+        fallback_protein = None
 
-                    domains.append({
-                        "name":          name,
-                        "database":      em.get("source_database", ""),
-                        "interpro_id":   em.get("accession", ""),
-                        "entry_type":    entry_type,
-                        "start":         start,
-                        "end":           end,
-                        "length_aa":     length,
-                        "description":   em.get("description", ""),
-                        "go_terms": [
-                            {"id": go.get("identifier", ""), "name": go.get("name", "")}
-                            for go in (em.get("go_terms") or [])[:3]
-                        ],
-                        "interpro_url":  f"https://www.ebi.ac.uk/interpro/entry/interpro/{em.get('accession', '')}",
-                    })
-            break
+        for prot in proteins:
+            prot_candidates = _interpro_protein_accession_candidates(prot)
+            has_locations = bool(prot.get("entry_protein_locations"))
+            if accession in prot_candidates:
+                matched_protein = prot
+                break
+            if fallback_protein is None and has_locations:
+                fallback_protein = prot
+
+        selected_protein = matched_protein or fallback_protein
+        if selected_protein is None:
+            continue
+        if matched_protein is None:
+            logger.warning(
+                "[InterPro] Falling back to positional protein block for {} entry {}",
+                accession,
+                em.get("accession", ""),
+            )
+
+        for loc in selected_protein.get("entry_protein_locations", []):
+            for frag in loc.get("fragments", []):
+                start = frag.get("start", 0)
+                end   = frag.get("end", 0)
+                length = end - start + 1
+                covered_fragments.append((start, end))
+
+                domains.append({
+                    "name":          name,
+                    "database":      em.get("source_database", ""),
+                    "interpro_id":   em.get("accession", ""),
+                    "entry_type":    entry_type,
+                    "start":         start,
+                    "end":           end,
+                    "length_aa":     length,
+                    "description":   em.get("description", ""),
+                    "go_terms": [
+                        {"id": go.get("identifier", ""), "name": go.get("name", "")}
+                        for go in (em.get("go_terms") or [])[:3]
+                    ],
+                    "interpro_url":  f"https://www.ebi.ac.uk/interpro/entry/interpro/{em.get('accession', '')}",
+                })
 
     if not domains and entries_data.get("results"):
         logger.warning(

@@ -49,7 +49,9 @@ _VALID_STATUSES = frozenset({
     "ACTIVE_NOT_RECRUITING", "TERMINATED", "ALL",
 })
 _VALID_PHASES = frozenset({"PHASE1", "PHASE2", "PHASE3", "PHASE4"})
-_CT_403_RETRY_DELAY_SECONDS = int(os.getenv("BIOMCP_CT_403_RETRY_DELAY", "60"))
+_CT_403_RETRY_ATTEMPTS = int(os.getenv("BIOMCP_CT_403_RETRY_ATTEMPTS", "3"))
+_CT_403_RETRY_BASE_DELAY_SECONDS = float(os.getenv("BIOMCP_CT_403_RETRY_BASE_DELAY", "2"))
+_CT_403_RETRY_MAX_DELAY_SECONDS = float(os.getenv("BIOMCP_CT_403_RETRY_MAX_DELAY", "8"))
 
 
 async def _clinical_trials_get_with_403_retry(
@@ -58,12 +60,22 @@ async def _clinical_trials_get_with_403_retry(
     *,
     params: dict[str, Any],
 ) -> Any:
-    for attempt in range(2):
+    response = None
+    for attempt in range(_CT_403_RETRY_ATTEMPTS):
         resp = await client.get(f"{CLINTRIALS_BASE}{path}", params=params, headers=_CT_HEADERS)
-        if resp.status_code != 403 or attempt == 1:
+        response = resp
+        if resp.status_code != 403 or attempt == _CT_403_RETRY_ATTEMPTS - 1:
             return resp
-        await asyncio.sleep(_CT_403_RETRY_DELAY_SECONDS)
-    return resp
+        delay_s = min(
+            _CT_403_RETRY_BASE_DELAY_SECONDS * (2 ** attempt),
+            _CT_403_RETRY_MAX_DELAY_SECONDS,
+        )
+        logger.warning(
+            f"[ClinicalTrials] 403 rate limit on {path}; retrying in {delay_s:.1f}s "
+            f"(attempt {attempt + 1}/{_CT_403_RETRY_ATTEMPTS})"
+        )
+        await asyncio.sleep(delay_s)
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +118,10 @@ async def search_clinical_trials(
     resp = await _clinical_trials_get_with_403_retry(client, "/studies", params=params)
     if resp.status_code == 403:
         return {
-            "error": "ClinicalTrials.gov returned 403 — temporary rate limiting. Retry in 60s.",
+            "error": (
+                "ClinicalTrials.gov returned repeated 403 responses after exponential backoff. "
+                "Retry shortly."
+            ),
             "query": query, "studies": [], "total_found": 0,
         }
     resp.raise_for_status()
@@ -173,7 +188,12 @@ async def get_trial_details(nct_id: str) -> dict[str, Any]:
         params={"format": "json"},
     )
     if resp.status_code == 403:
-        return {"error": "ClinicalTrials.gov returned 403 — retry in 60 seconds."}
+        return {
+            "error": (
+                "ClinicalTrials.gov returned repeated 403 responses after exponential backoff. "
+                "Retry shortly."
+            )
+        }
     if resp.status_code == 404:
         return {"error": f"Trial '{nct_id}' not found."}
     resp.raise_for_status()
@@ -337,7 +357,7 @@ async def search_gene_expression(
             "geo_accession": acc,
             "title":         d.get("title",    ""),
             "summary":       (d.get("summary") or "")[:400],
-            "organism":      d.get("organism",  ""),
+            "organism":      d.get("organism") or d.get("taxon") or d.get("orgname", ""),
             "platform":      d.get("gpl",       ""),
             "n_samples":     d.get("n_samples", 0),
             "pubmed_ids":    d.get("pubmedids", []),

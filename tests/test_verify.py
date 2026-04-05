@@ -55,6 +55,49 @@ async def test_verify_biological_claim_parses_pubmed_sentiment():
     assert result["contradicting_evidence"][0]["source"] == "PubMed"
 
 
+@pytest.mark.asyncio
+async def test_verify_biological_claim_treats_resistance_papers_as_unresolved():
+    pubmed_result = {
+        "articles": [
+            {
+                "title": "Mechanisms of resistance to KRAS G12C inhibition in lung cancer",
+                "abstract": (
+                    "This review covers adaptive resistance pathways and bypass signaling "
+                    "observed after KRAS G12C inhibitor therapy."
+                ),
+                "pmid": "2001",
+                "url": "https://pubmed.ncbi.nlm.nih.gov/2001/",
+            }
+        ]
+    }
+    protein_result = {"proteins": [{"genes": ["KRAS"]}]}
+    association_result = {
+        "associations": [
+            {"disease_name": "lung cancer", "overall_score": 0.88},
+        ]
+    }
+
+    with (
+        patch("biomcp.tools.ncbi.search_pubmed", new=AsyncMock(return_value=pubmed_result)),
+        patch("biomcp.tools.proteins.search_proteins", new=AsyncMock(return_value=protein_result)),
+        patch(
+            "biomcp.tools.pathways.get_gene_disease_associations",
+            new=AsyncMock(return_value=association_result),
+        ),
+    ):
+        from biomcp.tools.verify import verify_biological_claim
+
+        result = await verify_biological_claim(
+            "KRAS G12C is an oncogenic driver in lung cancer",
+            context_gene="KRAS",
+        )
+
+    assert result["evidence_counts"]["contradicting"] == 0
+    assert result["confidence_grade"] == "B"
+    assert result["unresolved"][0]["source"] == "PubMed"
+    assert "Resistance or escape-mechanism context" in result["unresolved"][0]["rationale"]
+
+
 def test_synthesize_conflicting_evidence_explains_activity_spread():
     from biomcp.tools.verify import synthesize_conflicting_evidence
 

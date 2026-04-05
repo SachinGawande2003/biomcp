@@ -28,11 +28,126 @@ _CHEMBL_ASSAY_TYPE_LABELS = {
     "U": "unclassified assay",
 }
 
+_PUBMED_SUPPORT_PATTERNS = (
+    "confirm",
+    "demonstrat",
+    "reveal",
+    "support",
+    "oncogenic",
+    "driver mutation",
+    "drives",
+    "promotes",
+    "required for",
+    "essential for",
+    "dependency",
+    "activating mutation",
+)
+
+_PUBMED_CONTRADICTION_PATTERNS = (
+    "no evidence",
+    "not associated",
+    "no association",
+    "did not observe",
+    "did not support",
+    "failed to demonstrate",
+    "failed to show",
+    "not required",
+    "dispensable",
+    "does not drive",
+    "independent of",
+)
+
+_PUBMED_RESISTANCE_PATTERNS = (
+    "mechanism of resistance",
+    "mechanisms of resistance",
+    "acquired resistance",
+    "drug resistance",
+    "resistance to",
+    "resistant to",
+    "bypass",
+    "escape",
+    "adaptive resistance",
+    "feedback activation",
+)
+
+_CLAIM_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "your", "their",
+    "drives", "drive", "progression", "cancer", "disease", "disorder", "syndrome",
+    "tumor", "tumour", "gene", "mutation", "variant", "pathway", "protein",
+}
+
 
 def _describe_assay_type(assay_type: str) -> str:
     if not assay_type:
         return "unspecified assay"
     return _CHEMBL_ASSAY_TYPE_LABELS.get(assay_type.upper(), assay_type)
+
+
+def _claim_focus_terms(claim_lower: str) -> set[str]:
+    tokens = re.findall(r"[a-z0-9]+", claim_lower)
+    return {
+        token
+        for token in tokens
+        if len(token) > 3 and token not in _CLAIM_STOPWORDS
+    }
+
+
+def _classify_pubmed_claim_evidence(
+    *,
+    claim_lower: str,
+    gene: str,
+    article: dict[str, Any],
+) -> tuple[str, str, str]:
+    title = (article.get("title", "") or "").lower()
+    abstract = (article.get("abstract", "") or "").lower()
+    text = f"{title} {abstract}".strip()
+
+    if not text:
+        return "unresolved", "Article text is unavailable for scoring.", "weak"
+
+    has_gene_context = not gene or gene.lower() in text
+    focus_terms = _claim_focus_terms(claim_lower)
+    matched_focus_terms = sorted(term for term in focus_terms if term in text)
+    support_hits = [pattern for pattern in _PUBMED_SUPPORT_PATTERNS if pattern in text]
+    contradiction_hits = [pattern for pattern in _PUBMED_CONTRADICTION_PATTERNS if pattern in text]
+    resistance_context = any(pattern in text for pattern in _PUBMED_RESISTANCE_PATTERNS)
+
+    if contradiction_hits and has_gene_context:
+        return (
+            "contradicting",
+            f"Explicit negation cues detected: {', '.join(contradiction_hits[:2])}.",
+            "moderate" if any(hit in {"no evidence", "not associated", "does not drive"} for hit in contradiction_hits) else "weak",
+        )
+
+    if resistance_context and has_gene_context:
+        return (
+            "unresolved",
+            "Resistance or escape-mechanism context does not directly negate the core biological claim.",
+            "weak",
+        )
+
+    if support_hits and has_gene_context:
+        rationale = f"Supportive biological cues detected: {', '.join(support_hits[:2])}."
+        if matched_focus_terms:
+            rationale += f" Claim-focus terms also overlap ({', '.join(matched_focus_terms[:3])})."
+        return (
+            "supporting",
+            rationale,
+            "strong" if len(support_hits) >= 2 else "moderate",
+        )
+
+    if matched_focus_terms and has_gene_context:
+        return (
+            "unresolved",
+            f"The paper overlaps claim context ({', '.join(matched_focus_terms[:3])}) but lacks explicit supportive or contradictory language.",
+            "weak",
+        )
+
+    return (
+        "unresolved",
+        "The article does not provide explicit language that validates or refutes the claim.",
+        "weak",
+    )
 
 
 def synthesize_conflicting_evidence(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -80,7 +195,7 @@ def synthesize_conflicting_evidence(tool_results: list[dict[str, Any]]) -> dict[
             if result.get("activity_units")
         })
         years = sorted({
-            int(result.get("document_year"))
+            int(str(result.get("document_year", "")))
             for result in tool_results
             if str(result.get("document_year", "")).isdigit()
         })
@@ -297,35 +412,25 @@ async def verify_biological_claim(
     if isinstance(pubmed_result, dict):
         for article in pubmed_result.get("articles", []):
             try:
-                abstract = (article.get("abstract", "") or "").lower()
-                title    = (article.get("title", "")    or "").lower()
-                text     = abstract + " " + title
-
-                support_signals = sum(1 for w in [
-                    "confirms","demonstrate","shows","observed","reported",
-                    "found","reveals","indicates","consistent",
-                ] if w in text)
-                contra_signals = sum(1 for w in [
-                    "contradict","however","contrary","unexpectedly",
-                    "failed to","no evidence","not observed","disputes",
-                ] if w in text)
-
-                if support_signals >= contra_signals:
-                    supporting.append({
-                        "source":   "PubMed",
-                        "evidence": article.get("title", ""),
-                        "pmid":     article.get("pmid", ""),
-                        "url":      article.get("url", ""),
-                        "strength": "moderate" if support_signals < 3 else "strong",
-                    })
+                classification, rationale, strength = _classify_pubmed_claim_evidence(
+                    claim_lower=claim_lower,
+                    gene=gene,
+                    article=article,
+                )
+                evidence_item = {
+                    "source":   "PubMed",
+                    "evidence": article.get("title", ""),
+                    "pmid":     article.get("pmid", ""),
+                    "url":      article.get("url", ""),
+                    "strength": strength,
+                    "rationale": rationale,
+                }
+                if classification == "supporting":
+                    supporting.append(evidence_item)
+                elif classification == "contradicting":
+                    contradicting.append(evidence_item)
                 else:
-                    contradicting.append({
-                        "source":   "PubMed",
-                        "evidence": article.get("title", ""),
-                        "pmid":     article.get("pmid", ""),
-                        "url":      article.get("url", ""),
-                        "strength": "weak",
-                    })
+                    unresolved.append(evidence_item)
             except Exception as exc:
                 logger.debug(f"[verify] Article scoring failed: {exc}")
 
@@ -420,8 +525,10 @@ async def verify_biological_claim(
         },
         "recommendation": recommendation,
         "methodology": (
-            "Evidence scored by keyword sentiment analysis of PubMed abstracts "
-            "and database-specific association scores. Not a substitute for expert review."
+            "Evidence scored with conservative rule-based claim checks over PubMed text "
+            "plus database-specific association scores. Resistance or mechanism papers are "
+            "treated as unresolved unless they explicitly negate the claim. Not a substitute "
+            "for expert review."
         ),
     }
 
@@ -440,13 +547,14 @@ async def detect_database_conflicts(
     gene_symbol = BioValidator.validate_gene_symbol(gene_symbol)
     logger.info(f"[ConflictDetector] Scanning databases for {gene_symbol}")
 
-    ncbi_result, uniprot_result, chembl_result, ot_result = await asyncio.gather(
+    gathered_results: list[Any] = list(await asyncio.gather(
         get_gene_info(gene_symbol),
         search_proteins(gene_symbol, max_results=1),
         get_drug_targets(gene_symbol, max_results=20),
         get_gene_disease_associations(gene_symbol, max_results=10),
         return_exceptions=True,
-    )
+    ))
+    ncbi_result, uniprot_result, chembl_result, ot_result = gathered_results
 
     conflicts: list[dict[str, Any]] = []
 

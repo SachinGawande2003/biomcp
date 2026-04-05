@@ -18,6 +18,7 @@ APIs:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from biomcp.utils import (
@@ -83,6 +84,102 @@ def _parse_kegg_flat_records(raw_text: str) -> list[dict[str, Any]]:
         })
 
     return records
+
+
+def _normalize_chembl_symbol(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.upper())
+
+
+def _chembl_target_symbols(target: dict[str, Any]) -> set[str]:
+    raw_values: list[str] = []
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            raw_values.append(value.strip())
+        elif isinstance(value, dict):
+            for nested in value.values():
+                _collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                _collect(nested)
+
+    _collect(target.get("pref_name"))
+    _collect(target.get("target_components"))
+
+    normalized: set[str] = set()
+    for raw in raw_values:
+        normalized_value = _normalize_chembl_symbol(raw)
+        if normalized_value:
+            normalized.add(normalized_value)
+        for token in re.split(r"[^A-Za-z0-9]+", raw):
+            normalized_token = _normalize_chembl_symbol(token)
+            if normalized_token:
+                normalized.add(normalized_token)
+    return normalized
+
+
+def _score_chembl_target_candidate(target: dict[str, Any], gene_symbol: str) -> tuple[int, bool]:
+    normalized_gene = _normalize_chembl_symbol(gene_symbol)
+    target_type = str(target.get("target_type", "")).upper()
+    pref_name = str(target.get("pref_name", ""))
+    pref_name_upper = pref_name.upper()
+    symbols = _chembl_target_symbols(target)
+
+    exact_match = normalized_gene in symbols or _normalize_chembl_symbol(pref_name) == normalized_gene
+
+    score = 0
+    if exact_match:
+        score += 100
+    if target_type == "SINGLE PROTEIN":
+        score += 60
+    elif target_type:
+        score -= 15
+    if str(target.get("organism", "")).lower() == "homo sapiens":
+        score += 10
+    if pref_name_upper == gene_symbol.upper():
+        score += 30
+    if gene_symbol.upper() in pref_name_upper:
+        score += 15
+    if "/" in pref_name or "FUSION" in pref_name_upper:
+        score -= 40
+
+    return score, exact_match
+
+
+async def _select_best_chembl_target(
+    client: Any,
+    *,
+    gene_symbol: str,
+    targets: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    scored_candidates: list[tuple[int, dict[str, Any], bool]] = []
+
+    for target in targets:
+        detail_payload = target
+        target_id = str(target.get("target_chembl_id", "")).strip()
+        if target_id:
+            detail_resp = await client.get(
+                f"{CHEMBL_BASE}/target/{target_id}.json",
+                headers={"Accept": "application/json"},
+            )
+            if detail_resp.status_code == 200:
+                detail_payload = detail_resp.json()
+
+        score, exact_match = _score_chembl_target_candidate(detail_payload, gene_symbol)
+        scored_candidates.append((score, detail_payload, exact_match))
+
+    if not scored_candidates:
+        return None
+
+    scored_candidates.sort(
+        key=lambda item: (
+            item[0],
+            str(item[1].get("target_type", "")).upper() == "SINGLE PROTEIN",
+            str(item[1].get("pref_name", "")),
+        ),
+        reverse=True,
+    )
+    return scored_candidates[0][1]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,7 +524,7 @@ async def get_drug_targets(
     # Step 1 — find target
     tgt_resp = await client.get(
         f"{CHEMBL_BASE}/target/search.json",
-        params={"q": gene_symbol, "organism": "Homo sapiens", "limit": 5},
+        params={"q": gene_symbol, "organism": "Homo sapiens", "limit": 10},
     )
     tgt_resp.raise_for_status()
     targets = tgt_resp.json().get("targets", [])
@@ -436,8 +533,13 @@ async def get_drug_targets(
         return {"gene": gene_symbol, "drugs": [],
                 "error": f"Target '{gene_symbol}' not found in ChEMBL."}
 
-    target_id   = targets[0].get("target_chembl_id", "")
-    target_name = targets[0].get("pref_name", "")
+    best_target = await _select_best_chembl_target(client, gene_symbol=gene_symbol, targets=targets)
+    if not best_target:
+        return {"gene": gene_symbol, "drugs": [],
+                "error": f"Target '{gene_symbol}' not found in ChEMBL."}
+
+    target_id   = best_target.get("target_chembl_id", "")
+    target_name = best_target.get("pref_name", "")
 
     # Step 2 — get activities
     act_resp = await client.get(

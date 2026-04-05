@@ -116,7 +116,7 @@ async def test_get_protein_info_uses_uniprot_disease_fallbacks(mock_http_client,
     assert "Autosomal dominant familial cancer syndrome." in result["diseases"][0]["description"]
     assert "variants affecting the gene" in result["diseases"][0]["description"]
     assert result["diseases"][0]["disease_id"] == "Li-Fraumeni syndrome"
-    assert result["diseases"][1]["name"] == ""
+    assert result["diseases"][1]["name"] == "TP53"
     assert "frequently mutated in multiple cancers" in result["diseases"][1]["description"]
 
 

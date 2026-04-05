@@ -6,6 +6,7 @@ Covers BioValidator, TTLCache, RateLimiter, and make_cache_key.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 from uuid import uuid4
@@ -125,6 +126,7 @@ class TestCache:
     def test_cache_ttl_anchors_for_reviewed_sources(self):
         assert CACHE_TTLS["fda"] == 3_600
         assert CACHE_TTLS["clinical_trials"] == 1_800
+        assert CACHE_TTLS["multi_omics"] == 3_600
         assert CACHE_TTLS["variant"] == 86_400
         assert CACHE_TTLS["gtex"] == 604_800
         assert CACHE_TTLS["tcga"] == 604_800
@@ -203,8 +205,10 @@ async def test_get_http_client_recreates_client_for_new_event_loop(monkeypatch: 
     monkeypatch.setattr(utils, "_HTTP_LOCK", None)
 
     client = await utils.get_http_client()
+    await asyncio.sleep(0)
 
     assert client is created[0]
     assert client is not stale_client
+    assert stale_client.is_closed is True
 
     await utils.close_http_client()

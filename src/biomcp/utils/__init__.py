@@ -60,6 +60,34 @@ _HTTP_CLIENT_LOOP_ID: int | None = None
 _HTTP_LOCK: asyncio.Lock | None = None
 
 
+async def _close_http_client_safely(
+    client: httpx.AsyncClient,
+    *,
+    reason: str,
+) -> None:
+    try:
+        await client.aclose()
+    except Exception as exc:
+        logger.debug(f"HTTP client close skipped after {reason}: {exc}")
+    else:
+        logger.debug(f"HTTP client closed after {reason}")
+
+
+def _schedule_http_client_close(
+    client: httpx.AsyncClient | None,
+    *,
+    reason: str,
+) -> None:
+    if client is None or client.is_closed:
+        return
+    try:
+        asyncio.get_running_loop().create_task(
+            _close_http_client_safely(client, reason=reason)
+        )
+    except RuntimeError as exc:
+        logger.debug(f"Unable to schedule HTTP client close after {reason}: {exc}")
+
+
 async def get_http_client() -> httpx.AsyncClient:
     """
     Return the module-level shared async HTTP client.
@@ -78,8 +106,11 @@ async def get_http_client() -> httpx.AsyncClient:
         and _HTTP_CLIENT_LOOP_ID is not None
         and _HTTP_CLIENT_LOOP_ID != current_loop_id
     ):
-        logger.debug("Discarding HTTP client bound to a different event loop")
+        stale_client = _HTTP_CLIENT
+        logger.debug("Replacing HTTP client bound to a different event loop")
         _HTTP_CLIENT = None
+        _HTTP_CLIENT_LOOP_ID = None
+        _schedule_http_client_close(stale_client, reason="event-loop change")
 
     if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
         async with _HTTP_LOCK:
@@ -118,11 +149,12 @@ async def close_http_client() -> None:
 
     if client and not client.is_closed:
         current_loop_id = id(asyncio.get_running_loop())
-        if client_loop_id == current_loop_id:
-            await client.aclose()
-            logger.debug("HTTP client closed")
-        else:
-            logger.debug("Discarded HTTP client from a different event loop")
+        reason = (
+            "shutdown"
+            if client_loop_id == current_loop_id
+            else "shutdown across event-loop boundary"
+        )
+        await _close_http_client_safely(client, reason=reason)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,7 +182,7 @@ CACHE_TTLS: dict[str, int] = {
     "disgenet": 86_400,  # 24 h â€” curated gene-disease associations
     "pharmgkb": 86_400,  # 24 h â€” pharmacogenomics annotations
     "crispr": 86_400,  # 24 h â€” design inputs are mostly stable genomic references
-    "multi_omics": 1_800,  # 30 m â€” aggregate report includes clinical-trial state
+    "multi_omics": 3_600,  # 1 h â€” aggregate report is expensive and mostly session-stable
     "enrichment": 21_600,  # 6 h â€” derived pathway enrichment results
     "biorxiv": 3_600,  # 1 h â€” preprint search results shift quickly
     "interpro": 604_800,  # 7 d â€” domain/family annotations are release-oriented
@@ -521,7 +553,7 @@ def format_success(tool_name: str, data: Any, metadata: dict | None = None) -> s
     payload: dict[str, Any] = {
         "status": "success",
         "tool": tool_name,
-        "data": data,
+        "data": strip_cache_metadata(data),
     }
     if metadata:
         payload["metadata"] = metadata

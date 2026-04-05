@@ -91,6 +91,14 @@ async def get_protein_info(accession: str) -> dict[str, Any]:
         note_text = _txt(c)
         if note_text:
             description_parts.append(note_text)
+        if not name and description_parts:
+            first_description_word = (
+                description_parts[0]
+                .lstrip(" -–—:;,.")
+                .split()[0]
+                .strip(".,:;()[]{}")
+            )
+            name = first_description_word
         diseases.append({
             "name": name,
             "description": " ".join(dict.fromkeys(description_parts)),

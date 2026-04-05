@@ -302,6 +302,66 @@ async def test_get_protein_domain_structure_handles_missing_go_terms(
 
 
 @pytest.mark.asyncio
+async def test_get_protein_domain_structure_falls_back_when_interpro_uses_non_uniprot_ids(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object], status_code: int = 200):
+            self._payload = payload
+            self.status_code = status_code
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class FakeClient:
+        async def get(self, url: str, headers=None, params=None):
+            if "/entry/interpro/protein/uniprot/" in url:
+                return FakeResponse(
+                    {
+                        "results": [
+                            {
+                                "metadata": {
+                                    "accession": "IPR017441",
+                                    "name": "Tyrosine kinase catalytic domain",
+                                    "type": "domain",
+                                    "source_database": "InterPro",
+                                    "description": "Catalytic domain",
+                                    "go_terms": [],
+                                },
+                                "proteins": [
+                                    {
+                                        "accession": "ensp00000275493",
+                                        "entry_protein_locations": [
+                                            {"fragments": [{"start": 712, "end": 979}]}
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                )
+            if "/protein/uniprot/" in url:
+                return FakeResponse({"metadata": {"length": 1210}})
+            raise AssertionError(f"Unexpected URL: {url}")
+
+    async def fake_get_http_client() -> FakeClient:
+        return FakeClient()
+
+    monkeypatch.setattr(innovations, "get_http_client", fake_get_http_client)
+    utils.get_cache("interpro").clear()
+
+    result = await innovations.get_protein_domain_structure("P00533")
+
+    assert result["total_domains"] == 1
+    assert result["domains"][0]["name"] == "Tyrosine kinase catalytic domain"
+    assert result["domain_coverage_pct"] == 22.1
+
+
+@pytest.mark.asyncio
 async def test_get_protein_domain_structure_merges_overlapping_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ):

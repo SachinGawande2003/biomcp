@@ -189,6 +189,25 @@ class TestFormatters:
         assert out["tool"] == "my_tool"
         assert out["data"] == {"key": "value"}
 
+    def test_format_success_strips_cache_metadata(self):
+        import json
+
+        from biomcp.utils import format_success
+
+        out = json.loads(
+            format_success(
+                "my_tool",
+                {
+                    "key": "value",
+                    "_cache": {"status": "fresh"},
+                    "nested": {"answer": 42, "_cache": {"status": "cached"}},
+                },
+            )
+        )
+
+        assert "_cache" not in out["data"]
+        assert "_cache" not in out["data"]["nested"]
+
     def test_format_error_has_status(self):
         import json
 

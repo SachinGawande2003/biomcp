@@ -87,6 +87,83 @@ async def test_get_drug_targets_no_target(mock_http_client, mock_http_response):
 
 
 @pytest.mark.asyncio
+async def test_get_drug_targets_prefers_exact_single_protein_target(
+    mock_http_client,
+    mock_http_response,
+):
+    search_resp = mock_http_response(
+        json_data={
+            "targets": [
+                {
+                    "target_chembl_id": "CHEMBL_FUSION",
+                    "pref_name": "EGFR/PPP1CA fusion",
+                    "target_type": "FUSION PROTEIN",
+                    "organism": "Homo sapiens",
+                },
+                {
+                    "target_chembl_id": "CHEMBL203",
+                    "pref_name": "Epidermal growth factor receptor",
+                    "target_type": "SINGLE PROTEIN",
+                    "organism": "Homo sapiens",
+                },
+            ]
+        }
+    )
+    fusion_detail = mock_http_response(
+        json_data={
+            "target_chembl_id": "CHEMBL_FUSION",
+            "pref_name": "EGFR/PPP1CA fusion",
+            "target_type": "FUSION PROTEIN",
+            "organism": "Homo sapiens",
+        }
+    )
+    egfr_detail = mock_http_response(
+        json_data={
+            "target_chembl_id": "CHEMBL203",
+            "pref_name": "Epidermal growth factor receptor",
+            "target_type": "SINGLE PROTEIN",
+            "organism": "Homo sapiens",
+            "target_components": [
+                {
+                    "target_component_synonyms": [
+                        {"component_synonym": "EGFR"},
+                    ]
+                }
+            ],
+        }
+    )
+    activity_resp = mock_http_response(
+        json_data={
+            "activities": [
+                {
+                    "molecule_chembl_id": "CHEMBL25",
+                    "molecule_pref_name": "Gefitinib",
+                    "standard_type": "IC50",
+                    "standard_value": "1.1",
+                    "standard_units": "nM",
+                    "standard_relation": "=",
+                    "assay_type": "B",
+                    "document_year": 2019,
+                }
+            ],
+            "page_meta": {"total_count": 1},
+        }
+    )
+    mock_http_client.get = AsyncMock(
+        side_effect=[search_resp, fusion_detail, egfr_detail, activity_resp]
+    )
+
+    with patch("biomcp.tools.pathways.get_http_client", return_value=mock_http_client):
+        from biomcp.tools.pathways import get_drug_targets
+
+        result = await get_drug_targets.__wrapped__.__wrapped__.__wrapped__("EGFR")
+
+    assert result["target_chembl_id"] == "CHEMBL203"
+    assert result["target_name"] == "Epidermal growth factor receptor"
+    assert result["drugs"][0]["molecule_name"] == "Gefitinib"
+
+
+@pytest.mark.asyncio
 async def test_get_reactome_pathways_handles_transport_error(mock_http_client):
     with patch("biomcp.tools.pathways.get_http_client", return_value=mock_http_client):
         from biomcp.tools.pathways import get_reactome_pathways
