@@ -39,6 +39,12 @@ from tenacity import (
     wait_exponential,
 )
 
+from biomcp.observability import (
+    record_cache_event,
+    record_upstream_error,
+    record_upstream_request,
+)
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,6 +95,20 @@ def _schedule_http_client_close(
         logger.debug(f"Unable to schedule HTTP client close after {reason}: {exc}")
 
 
+async def _httpx_request_hook(request: httpx.Request) -> None:
+    request.extensions["biomcp_start_time"] = time.perf_counter()
+
+
+async def _httpx_response_hook(response: httpx.Response) -> None:
+    start_time = response.request.extensions.get("biomcp_start_time")
+    if isinstance(start_time, (int, float)):
+        record_upstream_request(
+            response.request.url.host or "unknown",
+            response.status_code,
+            max(0.0, time.perf_counter() - float(start_time)),
+        )
+
+
 async def get_http_client() -> httpx.AsyncClient:
     """
     Return the module-level shared async HTTP client.
@@ -119,6 +139,10 @@ async def get_http_client() -> httpx.AsyncClient:
                 _HTTP_CLIENT = httpx.AsyncClient(
                     timeout=httpx.Timeout(_HTTP_TIMEOUT, connect=10.0),
                     follow_redirects=True,
+                    event_hooks={
+                        "request": [_httpx_request_hook],
+                        "response": [_httpx_response_hook],
+                    },
                     headers={
                         "User-Agent": (
                             "Heuris-BioMCP/2.2 "
@@ -442,6 +466,7 @@ def cached(namespace: str, maxsize: int | None = None) -> Callable[[F], F]:
             key = make_cache_key(*args, **kwargs)
             if key in cache:
                 logger.debug(f"[cache HIT] {namespace}:{key[:8]}")
+                record_cache_event(namespace, "hit")
                 entry = cache[key]
                 if isinstance(entry, dict) and "payload" in entry:
                     return _decorate_cached_result(
@@ -454,6 +479,7 @@ def cached(namespace: str, maxsize: int | None = None) -> Callable[[F], F]:
                         status="cached",
                     )
                 return copy.deepcopy(entry)
+            record_cache_event(namespace, "miss")
             result = await func(*args, **kwargs)
             cached_at = time.time()
             entry = {
@@ -463,6 +489,7 @@ def cached(namespace: str, maxsize: int | None = None) -> Callable[[F], F]:
             }
             cache[key] = entry
             logger.debug(f"[cache SET] {namespace}:{key[:8]}")
+            record_cache_event(namespace, "set")
             return _decorate_cached_result(
                 result,
                 namespace=namespace,
@@ -571,14 +598,24 @@ def with_retry(
             )
         return isinstance(exc, (httpx.RequestError, httpx.TimeoutException, httpx.ConnectError))
 
+    def _before_sleep(rs: Any) -> None:
+        exc = rs.outcome.exception()
+        host = ""
+        if isinstance(exc, httpx.HTTPError):
+            request = _safe_httpx_request(exc)
+            if request is not None:
+                host = request.url.host or ""
+        record_upstream_error(host, type(exc).__name__)
+        logger.warning(
+            f"Retry attempt {rs.attempt_number}/{max_attempts}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
     return retry(
         retry=retry_if_exception(_is_retryable_http_exception),
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(multiplier=1, min=min_wait, max=max_wait),
-        before_sleep=lambda rs: logger.warning(
-            f"Retry attempt {rs.attempt_number}/{max_attempts}: "
-            f"{type(rs.outcome.exception()).__name__}: {rs.outcome.exception()}"
-        ),
+        before_sleep=_before_sleep,
         reraise=True,
     )
 
@@ -724,6 +761,13 @@ def format_success(tool_name: str, data: Any, metadata: dict | None = None) -> s
         return json.dumps(payload, indent=2, default=str)
 
 
+def _safe_httpx_request(error: httpx.HTTPError) -> httpx.Request | None:
+    try:
+        return error.request
+    except RuntimeError:
+        return None
+
+
 def format_error(
     tool_name: str,
     error: Exception,
@@ -752,9 +796,13 @@ def format_error(
 
     if isinstance(error, httpx.HTTPStatusError):
         payload["status_code"] = error.response.status_code
-        payload["url"] = str(error.request.url)
-    elif isinstance(error, httpx.RequestError) and error.request is not None:
-        payload["url"] = str(error.request.url)
+        request = _safe_httpx_request(error)
+        if request is not None:
+            payload["url"] = str(request.url)
+    elif isinstance(error, httpx.RequestError):
+        request = _safe_httpx_request(error)
+        if request is not None:
+            payload["url"] = str(request.url)
 
     # Include traceback for unexpected errors only
     if not isinstance(error, (ValueError, TypeError, KeyError, LookupError, httpx.HTTPError)):

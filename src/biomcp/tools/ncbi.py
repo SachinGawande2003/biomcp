@@ -276,6 +276,7 @@ async def run_blast(
     program: str  = "blastp",
     database: str = "nr",
     max_hits: int = 10,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     """
     Run NCBI BLAST sequence alignment.
@@ -334,6 +335,8 @@ async def run_blast(
         )
 
     logger.info(f"BLAST submitted: RID={rid} program={program} db={database}")
+    if progress_callback is not None:
+        await progress_callback("submitted", {"rid": rid, "program": program, "database": database})
 
     # ── Poll (max 120 s) ──────────────────────────────────────────────────────
     poll_interval_s = 5
@@ -352,10 +355,21 @@ async def run_blast(
         text = poll.text
         if "Status=READY" in text:
             logger.info(f"BLAST ready after {(attempt + 1) * poll_interval_s}s")
+            if progress_callback is not None:
+                await progress_callback("ready", {"rid": rid, "poll_seconds": (attempt + 1) * poll_interval_s})
             break
         if "Status=FAILED" in text or "Status=UNKNOWN" in text:
             raise RuntimeError(f"BLAST job {rid} failed on NCBI servers.")
         logger.debug(f"BLAST polling ({attempt + 1}/24)…")
+        if progress_callback is not None:
+            await progress_callback(
+                "polling",
+                {
+                    "rid": rid,
+                    "attempt": attempt + 1,
+                    "waited_s": (attempt + 1) * poll_interval_s,
+                },
+            )
     else:
         logger.warning(
             f"BLAST job {rid} still processing after {max_wait_s}s; returning pending status."
@@ -383,7 +397,16 @@ async def run_blast(
     )
     result.raise_for_status()
     raw_result = _extract_blast_result_text(result, rid)
-    return _parse_blast_json2(raw_result, rid, program, database)
+    parsed = _parse_blast_json2(raw_result, rid, program, database)
+    if progress_callback is not None:
+        await progress_callback(
+            "completed",
+            {
+                "rid": rid,
+                "total_hits": parsed.get("total_hits", 0),
+            },
+        )
+    return parsed
 
 
 def _extract_blast_result_text(response: Any, rid: str) -> str:

@@ -7,6 +7,7 @@ Unit tests for ClinicalTrials.gov, GEO, Ensembl, scRNA-seq, neuroimaging.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -63,6 +64,7 @@ async def test_search_clinical_trials_retries_after_403(mock_http_client, mock_h
     with (
         patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client),
         patch("biomcp.tools.advanced.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        patch("biomcp.tools.advanced.random.uniform", return_value=1.0),
     ):
         from biomcp.tools.advanced import search_clinical_trials
 
@@ -106,6 +108,7 @@ async def test_get_trial_details_retries_after_403(mock_http_client, mock_http_r
     with (
         patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client),
         patch("biomcp.tools.advanced.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        patch("biomcp.tools.advanced.random.uniform", return_value=1.0),
     ):
         from biomcp.tools.advanced import get_trial_details
 
@@ -126,6 +129,7 @@ async def test_clinical_trials_retry_uses_exponential_backoff(mock_http_client, 
     with (
         patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client),
         patch("biomcp.tools.advanced.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        patch("biomcp.tools.advanced.random.uniform", return_value=1.0),
     ):
         from biomcp.tools.advanced import search_clinical_trials
 
@@ -136,6 +140,30 @@ async def test_clinical_trials_retry_uses_exponential_backoff(mock_http_client, 
     assert result["total_found"] == 0
     assert mock_http_client.get.await_count == 3
     assert [call.args[0] for call in sleep_mock.await_args_list] == [2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_clinical_trials_circuit_breaker_short_circuits_after_recent_failures(
+    mock_http_client,
+    mock_http_response,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    rate_limited = mock_http_response(status_code=403)
+    mock_http_client.get = AsyncMock(return_value=rate_limited)
+
+    from biomcp.tools import advanced as advanced_module
+
+    monkeypatch.setattr(advanced_module, "_CT_FAILURE_TIMESTAMPS", deque([1.0, 2.0, 3.0]))
+    monkeypatch.setattr(advanced_module, "_CT_CIRCUIT_OPEN_UNTIL", 999.0)
+    monkeypatch.setattr(advanced_module.time, "monotonic", lambda: 100.0)
+
+    with patch("biomcp.tools.advanced.get_http_client", return_value=mock_http_client):
+        with pytest.raises(RuntimeError, match="temporarily unavailable"):
+            await advanced_module.search_clinical_trials.__wrapped__.__wrapped__.__wrapped__(
+                "EGFR lung cancer", max_results=5
+            )
+
+    assert mock_http_client.get.await_count == 0
 
 
 @pytest.mark.asyncio

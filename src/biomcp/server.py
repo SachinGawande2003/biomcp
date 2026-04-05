@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import quote, unquote
 
 import httpx
 from loguru import logger
@@ -32,6 +33,28 @@ except ImportError:  # pragma: no cover - compatibility fallback for older mcp S
     ToolAnnotations = None  # type: ignore[assignment,misc]
 
 from biomcp import __version__
+from biomcp.auth import (
+    api_key_auth_enabled,
+    auth_enabled,
+    build_authorization_metadata,
+    build_consent_page,
+    build_redirect_uri,
+    default_auth_subject,
+    exchange_authorization_code,
+    issue_authorization_code,
+    oauth_enabled,
+    refresh_access_token,
+    register_oauth_client,
+    validate_access_token,
+    validate_api_key,
+)
+from biomcp.observability import (
+    record_auth_event,
+    record_http_request,
+    record_tool_call,
+    record_upstream_error,
+    render_prometheus_metrics,
+)
 from biomcp.utils import (
     BioValidator,
     close_http_client,
@@ -49,6 +72,11 @@ MCP_SERVER_NAME = SERVER_DISPLAY_NAME
 STREAMABLE_HTTP_PATH = "/mcp"
 SSE_PATH = "/sse"
 MESSAGE_PATH = "/messages/"
+METRICS_PATH = "/metrics"
+OAUTH_METADATA_PATH = "/.well-known/oauth-authorization-server"
+OAUTH_AUTHORIZE_PATH = "/oauth/authorize"
+OAUTH_TOKEN_PATH = "/oauth/token"
+OAUTH_REGISTER_PATH = "/oauth/register"
 DEFAULT_SERVER_WEBSITE_URL = "https://heuris-biomcp.onrender.com"
 LOGO_ROUTE_PATH = "/logo.png"
 _DEFAULT_CACHE_WARM_GENES = [
@@ -83,6 +111,20 @@ _ACTIVE_PROGRESS_OWNER: contextvars.ContextVar[str | None] = contextvars.Context
 )
 _HTTP_RATE_LIMIT_STATE: dict[str, tuple[float, int]] = {}
 _HTTP_RATE_LIMIT_LOCK: asyncio.Lock | None = None
+_AUTH_EXEMPT_PATHS = {
+    "/",
+    "/health",
+    "/healthz",
+    "/readyz",
+    "/tool-health",
+    "/status",
+    OAUTH_METADATA_PATH,
+    OAUTH_AUTHORIZE_PATH,
+    OAUTH_TOKEN_PATH,
+    OAUTH_REGISTER_PATH,
+    LOGO_ROUTE_PATH,
+    "/logo.jpeg",
+}
 _RATE_LIMIT_EXEMPT_PATHS = {
     "/",
     "/health",
@@ -90,6 +132,10 @@ _RATE_LIMIT_EXEMPT_PATHS = {
     "/readyz",
     "/tool-health",
     "/status",
+    OAUTH_METADATA_PATH,
+    OAUTH_AUTHORIZE_PATH,
+    OAUTH_TOKEN_PATH,
+    OAUTH_REGISTER_PATH,
     LOGO_ROUTE_PATH,
     "/logo.jpeg",
 }
@@ -270,6 +316,24 @@ class _MCPProgressReporter:
         async with self._lock:
             self._current += 1.0
             await self._send(message=message, data=data, progress=self._current)
+
+    async def chunk(self, event: str, data: dict[str, Any]) -> None:
+        try:
+            await self._ctx.session.send_notification(
+                "notifications/message",
+                {
+                    "level": "info",
+                    "logger": SERVER_NAME,
+                    "data": {
+                        "tool": self._tool_name,
+                        "event": event,
+                        "chunk": data,
+                    },
+                    "relatedRequestId": self._ctx.request_id,
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"Chunk notification failed for {self._tool_name}: {exc}")
 
     async def finish(self, message: str, data: dict[str, Any] | None = None) -> None:
         async with self._lock:
@@ -478,6 +542,12 @@ def _build_root_report(transport_mode: str | None = None) -> dict[str, Any]:
         "ready_url": f"{base_url}/readyz" if mode == "http" else None,
         "status_url": f"{base_url}/status" if mode == "http" else None,
         "tool_health_url": f"{base_url}/tool-health" if mode == "http" else None,
+        "metrics_url": f"{base_url}{METRICS_PATH}" if mode == "http" else None,
+        "auth": (
+            build_authorization_metadata(base_url)
+            if oauth_enabled()
+            else {"enabled": auth_enabled(), "api_key_enabled": api_key_auth_enabled()}
+        ),
     }
 
 
@@ -529,10 +599,29 @@ def _http_rate_limit_settings() -> dict[str, Any]:
     except ValueError:
         window_seconds = 60
 
+    try:
+        authenticated_requests = int(
+            os.getenv("BIOMCP_HTTP_AUTH_RATE_LIMIT_REQUESTS", os.getenv("BIOMCP_HTTP_RATE_LIMIT_REQUESTS", "600"))
+        )
+    except ValueError:
+        authenticated_requests = 600
+
+    try:
+        authenticated_window_seconds = int(
+            os.getenv(
+                "BIOMCP_HTTP_AUTH_RATE_LIMIT_WINDOW_SECONDS",
+                os.getenv("BIOMCP_HTTP_RATE_LIMIT_WINDOW_SECONDS", "60"),
+            )
+        )
+    except ValueError:
+        authenticated_window_seconds = 60
+
     return {
         "enabled": enabled,
         "requests": max(1, requests),
         "window_seconds": max(1, window_seconds),
+        "authenticated_requests": max(1, authenticated_requests),
+        "authenticated_window_seconds": max(1, authenticated_window_seconds),
     }
 
 
@@ -544,6 +633,15 @@ def _session_store_report(transport_mode: str) -> dict[str, Any]:
         "configured_dir": configured_dir or ".biomcp_sessions",
         "persistent_across_restarts": persistent if transport_mode == "http" else True,
         "ephemeral_warning": transport_mode == "http" and not persistent,
+    }
+
+
+def _auth_settings() -> dict[str, Any]:
+    return {
+        "enabled": auth_enabled(),
+        "oauth_enabled": oauth_enabled(),
+        "api_key_enabled": api_key_auth_enabled(),
+        "issuer": build_authorization_metadata(_server_website_url()).get("issuer"),
     }
 
 
@@ -560,6 +658,7 @@ def _build_server_status_report(transport_mode: str | None = None) -> dict[str, 
         "http_policy": {
             "cors_allowed_origins": _cors_allowed_origins(),
             "rate_limit": _http_rate_limit_settings(),
+            "auth": _auth_settings(),
         },
         "cache_warming": {
             "enabled": _cache_warming_enabled(mode),
@@ -570,6 +669,12 @@ def _build_server_status_report(transport_mode: str | None = None) -> dict[str, 
 
 
 def _client_identifier(scope: Any) -> str:
+    auth_context = scope.get("biomcp_auth")
+    if isinstance(auth_context, dict):
+        identity = auth_context.get("rate_limit_identity")
+        if identity:
+            return str(identity)
+
     headers = dict(scope.get("headers", []))
     forwarded_for = headers.get(b"x-forwarded-for", b"").decode("utf-8", errors="ignore").strip()
     if forwarded_for:
@@ -581,7 +686,13 @@ def _client_identifier(scope: Any) -> str:
     return "unknown"
 
 
-async def _check_rate_limit(client_id: str, now: float | None = None) -> tuple[bool, int]:
+async def _check_rate_limit(
+    client_id: str,
+    *,
+    request_limit: int | None = None,
+    window_seconds: int | None = None,
+    now: float | None = None,
+) -> tuple[bool, int]:
     global _HTTP_RATE_LIMIT_LOCK
 
     settings = _http_rate_limit_settings()
@@ -592,29 +703,95 @@ async def _check_rate_limit(client_id: str, now: float | None = None) -> tuple[b
         _HTTP_RATE_LIMIT_LOCK = asyncio.Lock()
 
     current_time = now if now is not None else time.monotonic()
-    window_seconds = int(settings["window_seconds"])
-    request_limit = int(settings["requests"])
+    resolved_window_seconds = int(window_seconds or settings["window_seconds"])
+    resolved_request_limit = int(request_limit or settings["requests"])
 
     async with _HTTP_RATE_LIMIT_LOCK:
         expired = [
             key
             for key, (window_start, _) in _HTTP_RATE_LIMIT_STATE.items()
-            if current_time - window_start >= window_seconds
+            if current_time - window_start >= resolved_window_seconds
         ]
         for key in expired:
             _HTTP_RATE_LIMIT_STATE.pop(key, None)
 
         window_start, count = _HTTP_RATE_LIMIT_STATE.get(client_id, (current_time, 0))
-        if current_time - window_start >= window_seconds:
+        if current_time - window_start >= resolved_window_seconds:
             window_start = current_time
             count = 0
 
-        if count >= request_limit:
-            retry_after = max(1, int(window_seconds - (current_time - window_start)))
+        if count >= resolved_request_limit:
+            retry_after = max(1, int(resolved_window_seconds - (current_time - window_start)))
             return False, retry_after
 
         _HTTP_RATE_LIMIT_STATE[client_id] = (window_start, count + 1)
         return True, 0
+
+
+def _header_text(scope: Any, name: bytes) -> str:
+    headers = dict(scope.get("headers", []))
+    return headers.get(name, b"").decode("utf-8", errors="ignore").strip()
+
+
+def _authenticate_scope(scope: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    path = str(scope.get("path", ""))
+    if not auth_enabled() or path in _AUTH_EXEMPT_PATHS or path.startswith(LOGO_ROUTE_PATH):
+        return {"mode": "anonymous", "rate_limit_identity": _client_identifier(scope)}, None
+
+    auth_header = _header_text(scope, b"authorization")
+    if auth_header.lower().startswith("bearer "):
+        credential = auth_header.split(" ", 1)[1].strip()
+        token_payload = validate_access_token(credential)
+        if token_payload is not None:
+            record_auth_event("token_accepted")
+            return {
+                "mode": "oauth",
+                "subject": token_payload["subject"],
+                "client_id": token_payload["client_id"],
+                "scopes": token_payload["scope"],
+                "rate_limit_identity": f"oauth:{token_payload['client_id']}:{token_payload['subject']}",
+                "request_limit": _http_rate_limit_settings()["authenticated_requests"],
+                "window_seconds": _http_rate_limit_settings()["authenticated_window_seconds"],
+            }, None
+        api_key_payload = validate_api_key(credential)
+        if api_key_payload is not None:
+            record_auth_event("api_key_accepted", auth_mode="api_key")
+            return {
+                "mode": "api_key",
+                "key_id": api_key_payload["key_id"],
+                "scopes": api_key_payload["scopes"],
+                "rate_limit_identity": f"api-key:{api_key_payload['key_id']}",
+                "request_limit": api_key_payload["rate_limit_requests"],
+                "window_seconds": api_key_payload["rate_limit_window_seconds"],
+            }, None
+
+    x_api_key = _header_text(scope, b"x-api-key")
+    if x_api_key:
+        api_key_payload = validate_api_key(x_api_key)
+        if api_key_payload is not None:
+            record_auth_event("api_key_accepted", auth_mode="api_key")
+            return {
+                "mode": "api_key",
+                "key_id": api_key_payload["key_id"],
+                "scopes": api_key_payload["scopes"],
+                "rate_limit_identity": f"api-key:{api_key_payload['key_id']}",
+                "request_limit": api_key_payload["rate_limit_requests"],
+                "window_seconds": api_key_payload["rate_limit_window_seconds"],
+            }, None
+
+    metadata = build_authorization_metadata(_server_website_url()) if oauth_enabled() else {}
+    body = {
+        "service": SERVER_NAME,
+        "status": "unauthorized",
+        "detail": "Authentication is required for hosted MCP access.",
+        "auth": {
+            "oauth_enabled": oauth_enabled(),
+            "api_key_enabled": api_key_auth_enabled(),
+            "authorization_endpoint": metadata.get("authorization_endpoint"),
+            "token_endpoint": metadata.get("token_endpoint"),
+        },
+    }
+    return None, body
 
 
 class _RateLimitMiddleware:
@@ -627,13 +804,56 @@ class _RateLimitMiddleware:
             return
 
         path = str(scope.get("path", ""))
-        if path in _RATE_LIMIT_EXEMPT_PATHS or path.startswith(LOGO_ROUTE_PATH):
-            await self.app(scope, receive, send)
+        method = str(scope.get("method", "GET")).upper()
+        auth_context, unauthorized_body = _authenticate_scope(scope)
+        if unauthorized_body is not None:
+            body = json.dumps(unauthorized_body).encode("utf-8")
+            metadata = build_authorization_metadata(_server_website_url()) if oauth_enabled() else {}
+            headers = [(b"content-type", b"application/json")]
+            if oauth_enabled():
+                headers.append(
+                    (
+                        b"www-authenticate",
+                        (
+                            f'Bearer realm="{SERVER_DISPLAY_NAME}", authorization_uri="{metadata.get("authorization_endpoint", "")}"'
+                        ).encode(),
+                    )
+                )
+            record_http_request(path, method, 401, "unauthenticated")
+            await send({"type": "http.response.start", "status": 401, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
             return
 
-        allowed, retry_after = await _check_rate_limit(_client_identifier(scope))
+        scope["biomcp_auth"] = auth_context or {"mode": "anonymous"}
+        if path in _RATE_LIMIT_EXEMPT_PATHS or path.startswith(LOGO_ROUTE_PATH):
+            status_code = 200
+
+            async def _send(message: Any) -> None:
+                nonlocal status_code
+                if message.get("type") == "http.response.start":
+                    status_code = int(message.get("status", status_code))
+                await send(message)
+
+            await self.app(scope, receive, _send)
+            record_http_request(path, method, status_code, str((auth_context or {}).get("mode", "anonymous")))
+            return
+
+        allowed, retry_after = await _check_rate_limit(
+            _client_identifier(scope),
+            request_limit=(auth_context or {}).get("request_limit"),
+            window_seconds=(auth_context or {}).get("window_seconds"),
+        )
         if allowed:
-            await self.app(scope, receive, send)
+            status_code = 200
+
+            async def _send(message: Any) -> None:
+                nonlocal status_code
+                if message.get("type") == "http.response.start":
+                    status_code = int(message.get("status", status_code))
+                await send(message)
+
+            await self.app(scope, receive, _send)
+            record_http_request(path, method, status_code, str((auth_context or {}).get("mode", "anonymous")))
             return
 
         body = json.dumps(
@@ -644,6 +864,7 @@ class _RateLimitMiddleware:
                 "retry_after_s": retry_after,
             }
         ).encode("utf-8")
+        record_http_request(path, method, 429, str((auth_context or {}).get("mode", "anonymous")))
         await send(
             {
                 "type": "http.response.start",
@@ -1637,7 +1858,20 @@ TOOLS = [
         {
             "action": _enum_prop(
                 "Session workflow step.",
-                ["resolve_entity", "knowledge_graph", "connections", "export", "save", "restore", "saved_sessions", "plan"],
+                [
+                    "resolve_entity",
+                    "knowledge_graph",
+                    "connections",
+                    "export",
+                    "save",
+                    "restore",
+                    "saved_sessions",
+                    "plan",
+                    "watch",
+                    "watch_check",
+                    "watch_list",
+                    "watch_remove",
+                ],
                 "resolve_entity",
             ),
             "query": _str_prop("Entity query or planning goal."),
@@ -1874,6 +2108,7 @@ _PUBLIC_TOOL_EXAMPLES: dict[str, list[dict[str, Any]]] = {
     "session": [
         {"action": "resolve_entity", "query": "EGFR", "hint_type": "gene"},
         {"action": "save", "label": "egfr-investigation"},
+        {"action": "watch", "query": "KRAS G12C lung cancer", "label": "kras-surveillance"},
     ],
     "drug_interaction_checker": [
         {"drug_name": "warfarin", "co_medications": ["amiodarone", "fluconazole"]}
@@ -1907,6 +2142,9 @@ _RESOURCE_CAPABILITIES_URI = "biomcp://server/capabilities"
 _RESOURCE_STATUS_URI = "biomcp://server/status"
 _RESOURCE_TOOL_CATALOG_URI = "biomcp://tools/catalog"
 _RESOURCE_SESSION_PREFIX = "biomcp://session/"
+_RESOURCE_GENE_PREFIX = "biomcp://gene/"
+_RESOURCE_DISEASE_PREFIX = "biomcp://disease/"
+_RESOURCE_WATCH_PREFIX = "biomcp://watch/"
 _RESOURCE_METADATA: dict[str, dict[str, str]] = {
     _RESOURCE_CAPABILITIES_URI: {
         "name": "server-capabilities",
@@ -1922,6 +2160,11 @@ _RESOURCE_METADATA: dict[str, dict[str, str]] = {
         "name": "server-status",
         "title": "BioMCP Runtime Status",
         "description": "Deployment status, HTTP policy, persistence configuration, and capability health.",
+    },
+    "biomcp://resources/entities": {
+        "name": "entity-resources",
+        "title": "BioMCP Entity Resource Patterns",
+        "description": "How to access gene, disease, and watch resources via biomcp:// URIs.",
     },
 }
 
@@ -1976,7 +2219,97 @@ def _saved_session_resource_definitions() -> list[Resource]:
     return definitions
 
 
-def _resource_payload(uri: str) -> dict[str, Any]:
+def _watched_topic_resource_definitions() -> list[Resource]:
+    from biomcp.session_watch import list_watches, resource_uri_for_watch
+
+    definitions: list[Resource] = []
+    for watch in list_watches():
+        topic = str(watch.get("topic", "")).strip()
+        if not topic:
+            continue
+        definitions.append(
+            Resource(
+                name=f"watch-{watch.get('watch_id', topic)}",
+                title=f"Literature Watch: {topic}",
+                uri=resource_uri_for_watch(topic),
+                description="Persistent PubMed + bioRxiv literature watch topic.",
+                mimeType="application/json",
+            )
+        )
+    return definitions
+
+
+async def _build_gene_resource_payload(symbol: str) -> dict[str, Any]:
+    from biomcp.tools.ncbi import get_gene_info
+    from biomcp.tools.pathways import (
+        get_drug_targets,
+        get_gene_disease_associations,
+        get_reactome_pathways,
+    )
+    from biomcp.tools.proteins import search_proteins
+
+    gene = BioValidator.validate_gene_symbol(symbol)
+    gene_results: tuple[Any, Any, Any, Any, Any] = await asyncio.gather(
+        get_gene_info(gene),
+        search_proteins(gene, max_results=1, reviewed_only=True),
+        get_reactome_pathways(gene),
+        get_gene_disease_associations(gene, max_results=5),
+        get_drug_targets(gene, max_results=5),
+        return_exceptions=True,
+    )
+    gene_info, proteins, pathways, diseases, drugs = gene_results
+    return {
+        "resource_uri": f"{_RESOURCE_GENE_PREFIX}{gene}",
+        "gene": gene,
+        "gene_info": gene_info if isinstance(gene_info, dict) else {"error": str(gene_info)},
+        "protein": proteins if isinstance(proteins, dict) else {"error": str(proteins)},
+        "pathways": pathways if isinstance(pathways, dict) else {"error": str(pathways)},
+        "disease_associations": diseases if isinstance(diseases, dict) else {"error": str(diseases)},
+        "drug_targets": drugs if isinstance(drugs, dict) else {"error": str(drugs)},
+    }
+
+
+async def _build_disease_resource_payload(name: str) -> dict[str, Any]:
+    from biomcp.core.knowledge_graph import get_skg
+    from biomcp.tools.ncbi import search_pubmed
+
+    disease_name = unquote(name).strip()
+    if not disease_name:
+        raise ValueError("Disease resource URI must include a disease name.")
+
+    papers = await search_pubmed(f'"{disease_name}" review', max_results=8, sort="pub_date")
+    skg = await get_skg()
+    snapshot = skg.snapshot()
+    related_nodes: list[dict[str, Any]] = []
+    disease_lower = disease_name.lower()
+    for node_type, nodes in snapshot.get("nodes_by_type", {}).items():
+        for node in nodes[:50]:
+            label = str(node.get("label", "")).lower()
+            if disease_lower in label or label in disease_lower:
+                related_nodes.append({"type": node_type, **node})
+
+    return {
+        "resource_uri": f"{_RESOURCE_DISEASE_PREFIX}{quote(disease_name)}",
+        "disease": disease_name,
+        "latest_literature": {
+            "query": papers.get("query", ""),
+            "total_found": papers.get("total_found", 0),
+            "articles": papers.get("articles", [])[:8],
+        },
+        "session_graph_context": {
+            "matching_nodes": related_nodes[:10],
+            "graph_summary": snapshot.get("summary", {}),
+        },
+    }
+
+
+async def _build_watch_resource_payload(topic: str) -> dict[str, Any]:
+    from biomcp.session_watch import check_watch
+
+    return await check_watch(unquote(topic))
+
+
+async def _resource_payload(uri: str) -> dict[str, Any]:
     if uri == _RESOURCE_CAPABILITIES_URI:
         resource_uris = sorted(str(resource.uri) for resource in _list_resource_definitions())
         return {
@@ -1994,6 +2327,16 @@ def _resource_payload(uri: str) -> dict[str, Any]:
             "resource_uris": resource_uris,
             "capabilities": _build_capability_status(),
         }
+    if uri == "biomcp://resources/entities":
+        return {
+            "service": SERVER_NAME,
+            "resource_patterns": {
+                "gene": f"{_RESOURCE_GENE_PREFIX}" + "{HGNC_SYMBOL}",
+                "disease": f"{_RESOURCE_DISEASE_PREFIX}" + "{URL-ENCODED_DISEASE_NAME}",
+                "watch": f"{_RESOURCE_WATCH_PREFIX}" + "{URL-ENCODED_TOPIC}",
+            },
+            "default_gene_resources": [f"{_RESOURCE_GENE_PREFIX}{gene}" for gene in _DEFAULT_CACHE_WARM_GENES[:10]],
+        }
     if uri == _RESOURCE_TOOL_CATALOG_URI:
         return {
             "service": SERVER_NAME,
@@ -2003,6 +2346,12 @@ def _resource_payload(uri: str) -> dict[str, Any]:
         }
     if uri == _RESOURCE_STATUS_URI:
         return _build_server_status_report(transport_mode=os.getenv("BIOMCP_TRANSPORT", "stdio"))
+    if uri.startswith(_RESOURCE_GENE_PREFIX):
+        return await _build_gene_resource_payload(uri.removeprefix(_RESOURCE_GENE_PREFIX))
+    if uri.startswith(_RESOURCE_DISEASE_PREFIX):
+        return await _build_disease_resource_payload(uri.removeprefix(_RESOURCE_DISEASE_PREFIX))
+    if uri.startswith(_RESOURCE_WATCH_PREFIX):
+        return await _build_watch_resource_payload(uri.removeprefix(_RESOURCE_WATCH_PREFIX))
     if uri.startswith(_RESOURCE_SESSION_PREFIX):
         from biomcp.core.knowledge_graph import load_saved_session
 
@@ -2024,11 +2373,12 @@ def _list_resource_definitions() -> list[Resource]:
         )
         for uri, meta in _RESOURCE_METADATA.items()
     ]
+    static_resources.extend(_watched_topic_resource_definitions())
     return static_resources + _saved_session_resource_definitions()
 
 
-def _read_resource_contents(uri: Any) -> list[ReadResourceContents]:
-    payload = json.dumps(_resource_payload(str(uri)), indent=2, sort_keys=True)
+async def _read_resource_contents(uri: Any) -> list[ReadResourceContents]:
+    payload = json.dumps(await _resource_payload(str(uri)), indent=2, sort_keys=True)
     return [ReadResourceContents(content=payload, mime_type="application/json")]
 
 
@@ -2172,6 +2522,47 @@ async def _list_saved_research_sessions() -> dict[str, Any]:
     }
 
 
+async def _add_literature_watch(topic: str, label: str = "") -> dict[str, Any]:
+    from biomcp.session_watch import resource_uri_for_watch, upsert_watch
+
+    payload = upsert_watch(topic, label=label)
+    return {
+        "watch": payload,
+        "resource_uri": resource_uri_for_watch(payload["topic"]),
+    }
+
+
+async def _check_literature_watch(topic: str) -> dict[str, Any]:
+    from biomcp.session_watch import check_watch, resource_uri_for_watch
+
+    payload = await check_watch(topic)
+    payload["resource_uri"] = resource_uri_for_watch(payload["watch"]["topic"])
+    return payload
+
+
+async def _list_literature_watches() -> dict[str, Any]:
+    from biomcp.session_watch import list_watches, resource_uri_for_watch
+
+    watches = list_watches()
+    return {
+        "watch_count": len(watches),
+        "watches": [
+            {
+                **watch,
+                "resource_uri": resource_uri_for_watch(str(watch.get("topic", ""))),
+            }
+            for watch in watches
+        ],
+    }
+
+
+async def _remove_literature_watch(topic: str) -> dict[str, Any]:
+    from biomcp.session_watch import remove_watch
+
+    removed = remove_watch(topic)
+    return {"topic": topic, "removed": removed}
+
+
 async def _plan_and_execute_research(
     goal: str,
     depth: str = "standard",
@@ -2271,6 +2662,23 @@ async def _session_workflow(
         if not plan_goal:
             raise ValueError("goal or query is required when action='plan'.")
         return await _plan_and_execute_research(goal=plan_goal, depth=depth)
+    if action == "watch":
+        topic = query or goal
+        if not topic:
+            raise ValueError("query or goal is required when action='watch'.")
+        return await _add_literature_watch(topic=topic, label=label)
+    if action == "watch_check":
+        topic = query or goal
+        if not topic:
+            raise ValueError("query or goal is required when action='watch_check'.")
+        return await _check_literature_watch(topic=topic)
+    if action == "watch_list":
+        return await _list_literature_watches()
+    if action == "watch_remove":
+        topic = query or goal
+        if not topic:
+            raise ValueError("query or goal is required when action='watch_remove'.")
+        return await _remove_literature_watch(topic=topic)
     raise ValueError("Unsupported session action.")
 
 
@@ -2327,6 +2735,14 @@ async def _dispatch_multi_omics_gene_report(
             return result
 
         async def _layer_progress(layer_name: str, layer_result: dict[str, Any]) -> None:
+            await reporter.chunk(
+                "tool_result_chunk",
+                {
+                    "layer": layer_name,
+                    "summary": _summarize_partial_result(layer_result),
+                    "result": layer_result,
+                },
+            )
             await reporter.advance(
                 f"{layer_name} ready: {_summarize_partial_result(layer_result)}",
                 {"layer": layer_name, "result": layer_result},
@@ -2339,6 +2755,56 @@ async def _dispatch_multi_omics_gene_report(
             progress_callback=_layer_progress,
         )
         cache[cache_key] = result
+        await reporter.finish(
+            f"completed multi-omics report for {gene_symbol}",
+            {
+                "gene": gene_symbol,
+                "cached": False,
+                "detail_level": detail_level,
+                "include_synthesis": include_synthesis,
+                "layers_completed": len(result.get("layers", {})),
+            },
+        )
+        return result
+
+
+async def _dispatch_run_blast(
+    sequence: str,
+    program: str = "blastp",
+    database: str = "nr",
+    max_hits: int = 10,
+) -> dict[str, Any]:
+    ncbi_tools = _get_tool_modules()["ncbi"]
+
+    async with _progress_stream("run_blast", total_steps=4) as reporter:
+        if reporter is None:
+            return await ncbi_tools.run_blast(
+                sequence=sequence,
+                program=program,
+                database=database,
+                max_hits=max_hits,
+            )
+
+        async def _blast_progress(stage: str, payload: dict[str, Any]) -> None:
+            await reporter.chunk("tool_result_chunk", {"stage": stage, "result": payload})
+            if stage in {"submitted", "ready", "completed"}:
+                await reporter.advance(f"{stage}: {_summarize_partial_result(payload)}", payload)
+
+        await reporter.log(
+            "starting BLAST submission",
+            {"program": program, "database": database, "max_hits": max_hits},
+        )
+        result = await ncbi_tools.run_blast(
+            sequence=sequence,
+            program=program,
+            database=database,
+            max_hits=max_hits,
+            progress_callback=_blast_progress,
+        )
+        await reporter.finish(
+            "blast completed",
+            {"total_hits": result.get("total_hits", 0), "rid": result.get("rid", "")},
+        )
         return result
 
 
@@ -2403,7 +2869,7 @@ def _build_dispatch_table() -> dict[str, Callable[..., Any]]:
     return {
         "search_pubmed": _module_dispatch(ncbi_tools, "search_pubmed"),
         "get_gene_info": _module_dispatch(ncbi_tools, "get_gene_info"),
-        "run_blast": _module_dispatch(ncbi_tools, "run_blast"),
+        "run_blast": _module_dispatch(sys.modules[__name__], "_dispatch_run_blast"),
         "get_protein_info": _module_dispatch(protein_tools, "get_protein_info"),
         "search_proteins": _module_dispatch(protein_tools, "search_proteins"),
         "get_alphafold_structure": _module_dispatch(protein_tools, "get_alphafold_structure"),
@@ -2519,15 +2985,26 @@ async def _raw_dispatch(name: str, args: dict[str, Any]) -> Any:
 
 async def _dispatch(name: str, args: dict[str, Any]) -> str:
     """MCP-facing dispatcher â€” wraps results in JSON envelopes."""
+    started = time.perf_counter()
     try:
         result = await _raw_dispatch(name, args)
+        record_tool_call(name, "success", time.perf_counter() - started)
         return format_success(name, result)
     except (ValueError, TypeError, LookupError, KeyError) as exc:
+        record_tool_call(name, "input_error", time.perf_counter() - started)
         return format_error(name, exc, {"arguments": args})
     except httpx.HTTPError as exc:
+        try:
+            request = exc.request
+        except RuntimeError:
+            request = None
+        host = request.url.host if request is not None else "unknown"
+        record_upstream_error(host or "unknown", type(exc).__name__)
+        record_tool_call(name, "http_error", time.perf_counter() - started)
         return format_error(name, exc, {"arguments": args})
     except Exception as exc:
         logger.exception(f"Unexpected error in tool '{name}'")
+        record_tool_call(name, "error", time.perf_counter() - started)
         return format_error(name, exc, {"arguments": args})
 
 
@@ -2759,7 +3236,7 @@ def create_server() -> Server:
 
         @server.read_resource()
         async def read_resource(uri: Any) -> list[ReadResourceContents]:
-            return _read_resource_contents(uri)
+            return await _read_resource_contents(uri)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
@@ -2807,7 +3284,14 @@ async def _run() -> None:
             from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
             from starlette.applications import Starlette
             from starlette.middleware.cors import CORSMiddleware
-            from starlette.responses import FileResponse, JSONResponse, Response
+            from starlette.responses import (
+                FileResponse,
+                HTMLResponse,
+                JSONResponse,
+                PlainTextResponse,
+                RedirectResponse,
+                Response,
+            )
             from starlette.routing import Mount, Route
 
             sse_transport = SseServerTransport(MESSAGE_PATH)
@@ -2854,6 +3338,112 @@ async def _run() -> None:
                 media_type = "image/png" if logo_path.lower().endswith(".png") else "image/jpeg"
                 return FileResponse(logo_path, media_type=media_type)
 
+            async def handle_metrics(request):
+                return PlainTextResponse(render_prometheus_metrics(), media_type="text/plain; version=0.0.4")
+
+            async def handle_oauth_metadata(request):
+                if not oauth_enabled():
+                    return JSONResponse({"detail": "OAuth is disabled."}, status_code=404)
+                return JSONResponse(build_authorization_metadata(_server_website_url()))
+
+            async def handle_oauth_register(request):
+                if not oauth_enabled():
+                    return JSONResponse({"detail": "OAuth is disabled."}, status_code=404)
+                payload = await request.json()
+                client = register_oauth_client(payload)
+                return JSONResponse(client, status_code=201)
+
+            async def handle_oauth_authorize_get(request):
+                if not oauth_enabled():
+                    return JSONResponse({"detail": "OAuth is disabled."}, status_code=404)
+
+                params = {
+                    "response_type": request.query_params.get("response_type", ""),
+                    "client_id": request.query_params.get("client_id", ""),
+                    "redirect_uri": request.query_params.get("redirect_uri", ""),
+                    "state": request.query_params.get("state", ""),
+                    "scope": request.query_params.get("scope", "mcp:tools mcp:resources"),
+                    "code_challenge": request.query_params.get("code_challenge", ""),
+                    "code_challenge_method": request.query_params.get("code_challenge_method", "S256"),
+                }
+                try:
+                    if params["response_type"] != "code":
+                        raise ValueError("Only response_type=code is supported.")
+                    if not params["client_id"] or not params["redirect_uri"] or not params["code_challenge"]:
+                        raise ValueError("client_id, redirect_uri, and code_challenge are required.")
+                except ValueError as exc:
+                    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+                auto_approve = os.getenv("BIOMCP_OAUTH_AUTO_APPROVE", "0").strip().lower() in {"1", "true", "on"}
+                if auto_approve:
+                    try:
+                        code = issue_authorization_code(
+                            client_id=params["client_id"],
+                            redirect_uri=params["redirect_uri"],
+                            code_challenge=params["code_challenge"],
+                            code_challenge_method=params["code_challenge_method"],
+                            scope=params["scope"],
+                            subject=default_auth_subject(),
+                        )
+                    except ValueError as exc:
+                        return JSONResponse({"detail": str(exc)}, status_code=400)
+                    return RedirectResponse(build_redirect_uri(params["redirect_uri"], code=code, state=params["state"]))
+
+                return HTMLResponse(build_consent_page(params, server_name=SERVER_DISPLAY_NAME))
+
+            async def handle_oauth_authorize_post(request):
+                if not oauth_enabled():
+                    return JSONResponse({"detail": "OAuth is disabled."}, status_code=404)
+                form = await request.form()
+                decision = str(form.get("decision", "deny"))
+                redirect_uri = str(form.get("redirect_uri", ""))
+                state = str(form.get("state", ""))
+                if decision != "approve":
+                    return RedirectResponse(build_redirect_uri(redirect_uri, state=state, error="access_denied"))
+
+                try:
+                    code = issue_authorization_code(
+                        client_id=str(form.get("client_id", "")),
+                        redirect_uri=redirect_uri,
+                        code_challenge=str(form.get("code_challenge", "")),
+                        code_challenge_method=str(form.get("code_challenge_method", "S256")),
+                        scope=str(form.get("scope", "mcp:tools mcp:resources")),
+                        subject=default_auth_subject(),
+                    )
+                except ValueError as exc:
+                    return JSONResponse({"detail": str(exc)}, status_code=400)
+                return RedirectResponse(build_redirect_uri(redirect_uri, code=code, state=state))
+
+            async def handle_oauth_token(request):
+                if not oauth_enabled():
+                    return JSONResponse({"detail": "OAuth is disabled."}, status_code=404)
+
+                if request.headers.get("content-type", "").startswith("application/json"):
+                    payload = await request.json()
+                else:
+                    form = await request.form()
+                    payload = dict(form)
+
+                grant_type = str(payload.get("grant_type", "authorization_code"))
+                try:
+                    if grant_type == "authorization_code":
+                        token_payload = exchange_authorization_code(
+                            code=str(payload.get("code", "")),
+                            client_id=str(payload.get("client_id", "")),
+                            redirect_uri=str(payload.get("redirect_uri", "")),
+                            code_verifier=str(payload.get("code_verifier", "")),
+                        )
+                    elif grant_type == "refresh_token":
+                        token_payload = refresh_access_token(
+                            refresh_token=str(payload.get("refresh_token", "")),
+                            client_id=str(payload.get("client_id", "")),
+                        )
+                    else:
+                        raise ValueError("Unsupported grant_type.")
+                except ValueError as exc:
+                    return JSONResponse({"error": "invalid_grant", "error_description": str(exc)}, status_code=400)
+                return JSONResponse(token_payload)
+
             @contextlib.asynccontextmanager
             async def lifespan(app: Starlette):
                 async with streamable_http_manager.run():
@@ -2872,6 +3462,12 @@ async def _run() -> None:
                     Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
                     Route("/tool-health", endpoint=handle_tool_health, methods=["GET"]),
                     Route("/status", endpoint=handle_status, methods=["GET"]),
+                    Route(METRICS_PATH, endpoint=handle_metrics, methods=["GET"]),
+                    Route(OAUTH_METADATA_PATH, endpoint=handle_oauth_metadata, methods=["GET"]),
+                    Route(OAUTH_REGISTER_PATH, endpoint=handle_oauth_register, methods=["POST"]),
+                    Route(OAUTH_AUTHORIZE_PATH, endpoint=handle_oauth_authorize_get, methods=["GET"]),
+                    Route(OAUTH_AUTHORIZE_PATH, endpoint=handle_oauth_authorize_post, methods=["POST"]),
+                    Route(OAUTH_TOKEN_PATH, endpoint=handle_oauth_token, methods=["POST"]),
                     Route(SSE_PATH, endpoint=handle_sse, methods=["GET"]),
                     Route(STREAMABLE_HTTP_PATH, endpoint=handle_streamable_http_head, methods=["HEAD"]),
                     Route(STREAMABLE_HTTP_PATH, endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),

@@ -26,6 +26,8 @@ Try Heuris-BioMCP without installing — connect to our live server:
 https://heuris-biomcp.onrender.com/mcp
 ```
 
+If hosted auth is enabled, Claude-compatible clients will complete the OAuth redirect flow automatically. Non-interactive clients can also use bearer API keys.
+
 ### Connect to Live Server
 
 For Claude, use `Customize > Connectors` and enter:
@@ -84,6 +86,8 @@ ChatGPT + Heuris-BioMCP -> Queries ChEMBL + ClinicalTrials.gov -> Structured ans
 - Added new translational tools: `drug_interaction_checker`, `protein_binding_pocket`, `biomarker_panel_design`, `pharmacogenomics_report`, `protein_family_analysis`, `network_enrichment`, `rnaseq_deconvolution`, `structural_similarity`, `rare_disease_diagnosis`, and `genome_browser_snapshot`
 - Removed low-signal or niche tools from the public MCP registry while keeping lower-level code available internally
 - Preserved hosted HTTP/SSE deployment and operational endpoints for production-style MCP review
+- Added optional hosted OAuth 2.1 PKCE and API-key auth for authenticated remote connectors
+- Added Prometheus metrics, streamed progress chunks for slow tools, persistent gene/disease/watch MCP resources, and literature watch workflows
 
 ---
 
@@ -225,6 +229,20 @@ Or manually:
 - Session snapshots saved through the `session` tool are only durable if `BIOMCP_SESSION_STORE_DIR` points to persistent storage.
 - On Render free tier, the default local directory uses ephemeral disk and will be wiped on restart, redeploy, or scale-to-zero wake-up.
 - If you need persistent saved sessions, set `BIOMCP_SESSION_STORE_DIR` to a mounted persistent path or move session persistence behind an external store before relying on cross-session restore.
+
+### Hosted Auth and Connector Setup
+
+- For Anthropic-style hosted connectors, enable `BIOMCP_AUTH_ENABLED=1`.
+- OAuth 2.1 PKCE is exposed at `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `/oauth/token`, and `/oauth/register`.
+- For machine-to-machine clients, set `BIOMCP_API_KEYS` and send either `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- Per-key limits are controlled with `BIOMCP_API_KEY_RATE_LIMIT_REQUESTS` and `BIOMCP_API_KEY_RATE_LIMIT_WINDOW_SECONDS`.
+
+### Persistent Resources and Literature Watches
+
+- `biomcp://gene/{SYMBOL}` returns a curated gene context resource with gene, protein, pathway, disease, and drug-target context.
+- `biomcp://disease/{URL-ENCODED-NAME}` returns disease literature plus session-graph context.
+- `session(action="watch")` registers a PubMed + bioRxiv watch and exposes `biomcp://watch/{TOPIC}` as a reusable resource.
+- Saved sessions and watches are only persistent if the backing session-store directory is durable.
 
 ### Privacy, Support, and Data Handling
 
@@ -437,10 +455,19 @@ biomcp/
 | `BIOMCP_TRANSPORT` | Transport mode: `stdio` or `http` | `stdio` |
 | `BIOMCP_HTTP_PORT` | HTTP port for hosted SSE deployments | `8080` |
 | `BIOMCP_SESSION_STORE_DIR` | Durable directory for saved sessions | `.biomcp_sessions` |
+| `BIOMCP_AUTH_ENABLED` | Require auth for hosted MCP requests | disabled |
+| `BIOMCP_OAUTH_ENABLED` | Enable OAuth 2.1 PKCE endpoints when auth is enabled | `1` |
+| `BIOMCP_API_KEYS` | Comma-separated API keys in `key_id:secret` form | None |
+| `BIOMCP_API_KEY_RATE_LIMIT_REQUESTS` | Per-key request budget per window | `600` |
+| `BIOMCP_API_KEY_RATE_LIMIT_WINDOW_SECONDS` | Per-key rate-limit window in seconds | `60` |
+| `BIOMCP_OAUTH_AUTO_APPROVE` | Auto-approve the consent screen for single-user deployments | `0` |
+| `BIOMCP_OAUTH_DEFAULT_SUBJECT` | Subject bound to approved OAuth tokens | `heuris-biomcp-user` |
 | `BIOMCP_CORS_ALLOW_ORIGINS` | Comma-separated browser origins allowed for CORS | disabled |
 | `BIOMCP_HTTP_RATE_LIMIT_ENABLED` | Enable per-client HTTP rate limiting | `1` |
 | `BIOMCP_HTTP_RATE_LIMIT_REQUESTS` | Requests allowed per rate-limit window | `120` |
 | `BIOMCP_HTTP_RATE_LIMIT_WINDOW_SECONDS` | Rate-limit window length in seconds | `60` |
+| `BIOMCP_HTTP_AUTH_RATE_LIMIT_REQUESTS` | Requests allowed per authenticated window | `600` |
+| `BIOMCP_HTTP_AUTH_RATE_LIMIT_WINDOW_SECONDS` | Authenticated rate-limit window length in seconds | `60` |
 | `BIOMCP_CACHE_WARMING` | Enable background cache warming in HTTP mode | `auto` |
 | `BIOMCP_LOG_LEVEL` | Log level: DEBUG/INFO/WARNING/ERROR | INFO |
 
@@ -457,9 +484,14 @@ When BioMCP runs in hosted HTTP mode, these operational routes are available:
 | Endpoint | Purpose |
 |----------|---------|
 | `/status` | Runtime status, HTTP policy, and session-storage configuration |
+| `/metrics` | Prometheus-compatible request, cache, latency, auth, and upstream metrics |
 | `/healthz` | Liveness and deployment metadata |
 | `/readyz` | Readiness check for orchestrators and load balancers |
 | `/tool-health` | Capability-level status, including missing optional API keys |
+| `/.well-known/oauth-authorization-server` | OAuth 2.1 metadata for hosted connectors |
+| `/oauth/register` | Dynamic OAuth client registration |
+| `/oauth/authorize` | OAuth authorization and PKCE consent |
+| `/oauth/token` | Authorization-code and refresh-token exchange |
 | `/mcp` | Streamable HTTP MCP endpoint |
 | `/sse` | MCP SSE endpoint |
 | `/messages/` | MCP message transport endpoint |

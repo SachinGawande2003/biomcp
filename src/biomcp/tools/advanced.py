@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -55,9 +57,35 @@ _VALID_PHASES = frozenset({"PHASE1", "PHASE2", "PHASE3", "PHASE4"})
 _CT_403_RETRY_ATTEMPTS = int(os.getenv("BIOMCP_CT_403_RETRY_ATTEMPTS", "3"))
 _CT_403_RETRY_BASE_DELAY_SECONDS = float(os.getenv("BIOMCP_CT_403_RETRY_BASE_DELAY", "2"))
 _CT_403_RETRY_MAX_DELAY_SECONDS = float(os.getenv("BIOMCP_CT_403_RETRY_MAX_DELAY", "8"))
+_CT_CIRCUIT_BREAKER_FAILURES = int(os.getenv("BIOMCP_CT_CIRCUIT_BREAKER_FAILURES", "3"))
+_CT_CIRCUIT_BREAKER_WINDOW_SECONDS = int(os.getenv("BIOMCP_CT_CIRCUIT_BREAKER_WINDOW_SECONDS", "300"))
+_CT_CIRCUIT_BREAKER_OPEN_SECONDS = int(os.getenv("BIOMCP_CT_CIRCUIT_BREAKER_OPEN_SECONDS", "120"))
 _CLAUDE_SYNTHESIS_ENABLED = os.getenv("BIOMCP_ENABLE_CLAUDE_SYNTHESIS", "1").strip().lower()
 _CLAUDE_SYNTHESIS_MODEL = os.getenv("BIOMCP_CLAUDE_SYNTHESIS_MODEL", "claude-sonnet-4-20250514")
 _CLAUDE_SYNTHESIS_MAX_TOKENS = int(os.getenv("BIOMCP_CLAUDE_SYNTHESIS_MAX_TOKENS", "700"))
+_CT_FAILURE_TIMESTAMPS: deque[float] = deque()
+_CT_CIRCUIT_OPEN_UNTIL: float = 0.0
+
+
+def _ct_record_failure(now: float | None = None) -> None:
+    global _CT_CIRCUIT_OPEN_UNTIL
+    current = now if now is not None else time.monotonic()
+    _CT_FAILURE_TIMESTAMPS.append(current)
+    while _CT_FAILURE_TIMESTAMPS and current - _CT_FAILURE_TIMESTAMPS[0] > _CT_CIRCUIT_BREAKER_WINDOW_SECONDS:
+        _CT_FAILURE_TIMESTAMPS.popleft()
+    if len(_CT_FAILURE_TIMESTAMPS) >= _CT_CIRCUIT_BREAKER_FAILURES:
+        _CT_CIRCUIT_OPEN_UNTIL = current + _CT_CIRCUIT_BREAKER_OPEN_SECONDS
+
+
+def _ct_record_success() -> None:
+    global _CT_CIRCUIT_OPEN_UNTIL
+    _CT_FAILURE_TIMESTAMPS.clear()
+    _CT_CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def _ct_circuit_open(now: float | None = None) -> bool:
+    current = now if now is not None else time.monotonic()
+    return _CT_CIRCUIT_OPEN_UNTIL > current
 
 
 async def _clinical_trials_get_with_403_retry(
@@ -66,21 +94,36 @@ async def _clinical_trials_get_with_403_retry(
     *,
     params: dict[str, Any],
 ) -> Any:
+    if _ct_circuit_open():
+        retry_after = max(1, int(_CT_CIRCUIT_OPEN_UNTIL - time.monotonic()))
+        raise RuntimeError(
+            f"ClinicalTrials.gov is temporarily unavailable after repeated failures. Retry in about {retry_after}s."
+        )
+
     response = None
     for attempt in range(_CT_403_RETRY_ATTEMPTS):
-        resp = await client.get(f"{CLINTRIALS_BASE}{path}", params=params, headers=_CT_HEADERS)
+        try:
+            resp = await client.get(f"{CLINTRIALS_BASE}{path}", params=params, headers=_CT_HEADERS)
+        except Exception:
+            _ct_record_failure()
+            raise
         response = resp
-        if resp.status_code != 403 or attempt == _CT_403_RETRY_ATTEMPTS - 1:
+        if resp.status_code != 403:
+            _ct_record_success()
+            return resp
+        _ct_record_failure()
+        if attempt == _CT_403_RETRY_ATTEMPTS - 1:
             return resp
         delay_s = min(
             _CT_403_RETRY_BASE_DELAY_SECONDS * (2 ** attempt),
             _CT_403_RETRY_MAX_DELAY_SECONDS,
         )
+        jittered_delay = delay_s * random.uniform(0.75, 1.25)
         logger.warning(
-            f"[ClinicalTrials] 403 rate limit on {path}; retrying in {delay_s:.1f}s "
+            f"[ClinicalTrials] 403 rate limit on {path}; retrying in {jittered_delay:.1f}s "
             f"(attempt {attempt + 1}/{_CT_403_RETRY_ATTEMPTS})"
         )
-        await asyncio.sleep(delay_s)
+        await asyncio.sleep(jittered_delay)
     return response
 
 

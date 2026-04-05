@@ -260,8 +260,9 @@ class TestMCPResources:
         assert "biomcp://server/status" in uris
         assert "biomcp://tools/catalog" in uris
 
-    def test_tool_catalog_resource_contains_examples(self):
-        contents = _read_resource_contents("biomcp://tools/catalog")
+    @pytest.mark.asyncio
+    async def test_tool_catalog_resource_contains_examples(self):
+        contents = await _read_resource_contents("biomcp://tools/catalog")
         assert len(contents) == 1
         assert contents[0].mime_type == "application/json"
 
@@ -270,8 +271,9 @@ class TestMCPResources:
         first_tool = payload["tools"][0]
         assert "examples" in first_tool
 
-    def test_capabilities_resource_includes_transport_and_health_endpoints(self):
-        contents = _read_resource_contents("biomcp://server/capabilities")
+    @pytest.mark.asyncio
+    async def test_capabilities_resource_includes_transport_and_health_endpoints(self):
+        contents = await _read_resource_contents("biomcp://server/capabilities")
         payload = json.loads(contents[0].content)
         assert payload["service"] == "heuris-biomcp"
         assert payload["transport_modes"] == ["stdio", "http"]
@@ -280,7 +282,8 @@ class TestMCPResources:
         assert "/status" in payload["health_endpoints"]
         assert "/readyz" in payload["health_endpoints"]
 
-    def test_status_resource_includes_http_policy_and_session_storage(
+    @pytest.mark.asyncio
+    async def test_status_resource_includes_http_policy_and_session_storage(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -288,7 +291,7 @@ class TestMCPResources:
         monkeypatch.setenv("BIOMCP_CORS_ALLOW_ORIGINS", "https://claude.ai,https://chatgpt.com")
         monkeypatch.setenv("BIOMCP_SESSION_STORE_DIR", "persistent/sessions")
 
-        contents = _read_resource_contents("biomcp://server/status")
+        contents = await _read_resource_contents("biomcp://server/status")
         payload = json.loads(contents[0].content)
 
         assert payload["transport_mode"] == "http"
@@ -298,6 +301,100 @@ class TestMCPResources:
         ]
         assert payload["session_storage"]["configured_dir"] == "persistent/sessions"
         assert payload["session_storage"]["ephemeral_warning"] is False
+
+    @pytest.mark.asyncio
+    async def test_entity_pattern_resource_describes_gene_disease_and_watch_uris(self):
+        contents = await _read_resource_contents("biomcp://resources/entities")
+        payload = json.loads(contents[0].content)
+
+        patterns = payload["resource_patterns"]
+        assert patterns["gene"] == "biomcp://gene/{HGNC_SYMBOL}"
+        assert patterns["disease"] == "biomcp://disease/{URL-ENCODED_DISEASE_NAME}"
+        assert patterns["watch"] == "biomcp://watch/{URL-ENCODED_TOPIC}"
+
+    @pytest.mark.asyncio
+    async def test_gene_resource_payload_is_readable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import biomcp.tools.ncbi as ncbi_module
+        import biomcp.tools.pathways as pathway_module
+        import biomcp.tools.proteins as protein_module
+
+        monkeypatch.setattr(
+            ncbi_module,
+            "get_gene_info",
+            AsyncMock(return_value={"symbol": "EGFR", "description": "epidermal growth factor receptor"}),
+        )
+        monkeypatch.setattr(
+            protein_module,
+            "search_proteins",
+            AsyncMock(return_value={"proteins": [{"accession": "P00533", "protein_name": "EGFR"}]}),
+        )
+        monkeypatch.setattr(
+            pathway_module,
+            "get_reactome_pathways",
+            AsyncMock(return_value={"pathways": [{"id": "R-HSA-1", "name": "EGFR signaling"}]}),
+        )
+        monkeypatch.setattr(
+            pathway_module,
+            "get_gene_disease_associations",
+            AsyncMock(return_value={"associations": [{"disease_name": "lung cancer"}]}),
+        )
+        monkeypatch.setattr(
+            pathway_module,
+            "get_drug_targets",
+            AsyncMock(return_value={"drugs": [{"molecule_name": "erlotinib"}]}),
+        )
+
+        contents = await _read_resource_contents("biomcp://gene/EGFR")
+        payload = json.loads(contents[0].content)
+
+        assert payload["gene"] == "EGFR"
+        assert payload["gene_info"]["symbol"] == "EGFR"
+        assert payload["protein"]["proteins"][0]["accession"] == "P00533"
+
+    @pytest.mark.asyncio
+    async def test_disease_resource_payload_uses_literature_and_graph_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import biomcp.core.knowledge_graph as knowledge_graph_module
+        import biomcp.tools.ncbi as ncbi_module
+
+        monkeypatch.setattr(
+            ncbi_module,
+            "search_pubmed",
+            AsyncMock(
+                return_value={
+                    "query": '"Lung cancer" review',
+                    "total_found": 2,
+                    "articles": [{"pmid": "1", "title": "Lung cancer review"}],
+                }
+            ),
+        )
+
+        class FakeSKG:
+            def snapshot(self):
+                return {
+                    "summary": {"total_nodes": 2},
+                    "nodes_by_type": {
+                        "disease": [{"label": "Lung cancer"}],
+                        "gene": [{"label": "EGFR"}],
+                    },
+                }
+
+        async def _fake_get_skg():
+            return FakeSKG()
+
+        monkeypatch.setattr(knowledge_graph_module, "get_skg", _fake_get_skg)
+
+        contents = await _read_resource_contents("biomcp://disease/Lung%20cancer")
+        payload = json.loads(contents[0].content)
+
+        assert payload["disease"] == "Lung cancer"
+        assert payload["latest_literature"]["total_found"] == 2
+        assert payload["session_graph_context"]["matching_nodes"][0]["label"] == "Lung cancer"
 
     @pytest.mark.asyncio
     async def test_session_resources_are_listed_after_save(
@@ -321,7 +418,7 @@ class TestMCPResources:
             uris = {str(resource.uri) for resource in resources}
             assert saved["resource_uri"] in uris
 
-            payload = json.loads(_read_resource_contents(saved["resource_uri"])[0].content)
+            payload = json.loads((await _read_resource_contents(saved["resource_uri"]))[0].content)
             assert payload["session_id"] == saved["session_id"]
             assert payload["graph_snapshot"]["summary"]["total_nodes"] == 1
 
@@ -334,6 +431,66 @@ class TestMCPResources:
             assert restored["graph_stats"]["nodes"] == 1
         finally:
             knowledge_graph_module.reset_skg()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_watch_workflow_registers_reads_and_removes_resources(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import biomcp.session_watch as session_watch_module
+
+        temp_dir = Path(".codex_test_tmp") / f"watch-{uuid4().hex}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("BIOMCP_SESSION_STORE_DIR", str(temp_dir))
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "collection": [
+                        {
+                            "title": "EGFR preprint",
+                            "doi": "10.1101/2026.04.05.123456",
+                            "date": "2026-04-05",
+                            "server": "biorxiv",
+                            "abstract": "EGFR signaling in tumors",
+                        }
+                    ]
+                }
+
+        fake_client = SimpleNamespace(get=AsyncMock(return_value=FakeResponse()))
+        monkeypatch.setattr(
+            session_watch_module,
+            "search_pubmed",
+            AsyncMock(
+                return_value={
+                    "query": "EGFR",
+                    "total_found": 1,
+                    "articles": [{"pmid": "123", "title": "EGFR paper"}],
+                }
+            ),
+        )
+        monkeypatch.setattr(session_watch_module, "get_http_client", AsyncMock(return_value=fake_client))
+
+        try:
+            added = await server_module._session_workflow(action="watch", query="EGFR", label="EGFR watch")
+            listed = await server_module._session_workflow(action="watch_list")
+            checked = await server_module._session_workflow(action="watch_check", query="EGFR")
+            resource_payload = json.loads((await _read_resource_contents(added["resource_uri"]))[0].content)
+            removed = await server_module._session_workflow(action="watch_remove", query="EGFR")
+
+            assert added["watch"]["topic"] == "EGFR"
+            assert listed["watch_count"] == 1
+            assert checked["counts"]["pubmed_new"] == 1
+            assert checked["counts"]["biorxiv_new"] == 1
+            assert resource_payload["watch"]["topic"] == "EGFR"
+            assert removed["removed"] is True
+        finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -516,6 +673,7 @@ class TestStreamingProgress:
         session = SimpleNamespace(
             send_progress_notification=AsyncMock(),
             send_log_message=AsyncMock(),
+            send_notification=AsyncMock(),
         )
         ctx = SimpleNamespace(
             meta=SimpleNamespace(progressToken="tok-1"),
@@ -555,13 +713,17 @@ class TestStreamingProgress:
 
         assert result["gene"] == "EGFR"
         assert result["detail_level"] == "compact"
-        assert session.send_progress_notification.await_count == 7
+        assert session.send_progress_notification.await_count == 8
+        assert session.send_notification.await_count == 7
         first_call = session.send_progress_notification.await_args_list[0]
         assert first_call.args[0] == "tok-1"
         assert first_call.args[1] == 1.0
         assert first_call.kwargs["total"] == 7.0
         assert "genomics ready" in first_call.kwargs["message"]
-        assert session.send_log_message.await_count == 8
+        assert session.send_log_message.await_count == 9
+        first_chunk = session.send_notification.await_args_list[0]
+        assert first_chunk.args[0] == "notifications/message"
+        assert first_chunk.args[1]["data"]["event"] == "tool_result_chunk"
 
     @pytest.mark.asyncio
     async def test_plan_and_execute_research_streams_progress_notifications(
@@ -571,6 +733,7 @@ class TestStreamingProgress:
         session = SimpleNamespace(
             send_progress_notification=AsyncMock(),
             send_log_message=AsyncMock(),
+            send_notification=AsyncMock(),
         )
         ctx = SimpleNamespace(
             meta=SimpleNamespace(progressToken="tok-2"),
@@ -625,6 +788,88 @@ class TestStreamingProgress:
         assert any("search_pubmed failed" in message for message in progress_messages)
         assert progress_messages[-1].endswith("plan complete: 1/2 steps successful")
         assert session.send_log_message.await_count == 5
+
+    @pytest.mark.asyncio
+    async def test_run_blast_dispatch_streams_stage_chunks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        session = SimpleNamespace(
+            send_progress_notification=AsyncMock(),
+            send_log_message=AsyncMock(),
+            send_notification=AsyncMock(),
+        )
+        ctx = SimpleNamespace(
+            meta=SimpleNamespace(progressToken="tok-3"),
+            session=session,
+            request_id="req-3",
+        )
+        ncbi_module = SimpleNamespace()
+
+        async def _fake_run_blast(**kwargs):
+            progress_callback = kwargs["progress_callback"]
+            for stage, payload in [
+                ("submitted", {"rid": "RID123"}),
+                ("polling", {"rid": "RID123", "status": "WAITING"}),
+                ("ready", {"rid": "RID123"}),
+                ("completed", {"rid": "RID123", "total_hits": 2}),
+            ]:
+                await progress_callback(stage, payload)
+            return {"rid": "RID123", "total_hits": 2, "hits": [{"accession": "P00533"}]}
+
+        ncbi_module.run_blast = _fake_run_blast
+
+        monkeypatch.setattr(server_module, "_SERVER_INSTANCE", SimpleNamespace(request_context=ctx))
+        monkeypatch.setattr(server_module, "_get_tool_modules", lambda: {"ncbi": ncbi_module})
+
+        result = await server_module._dispatch_run_blast("MTEYKLVVVG", max_hits=2)
+
+        assert result["rid"] == "RID123"
+        assert result["total_hits"] == 2
+        assert session.send_notification.await_count == 4
+        assert session.send_progress_notification.await_count == 4
+        chunk_events = [call.args[1]["data"]["chunk"]["stage"] for call in session.send_notification.await_args_list]
+        assert chunk_events == ["submitted", "polling", "ready", "completed"]
+
+
+class TestHostedAuth:
+    def test_authenticate_scope_requires_auth_when_enabled(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("BIOMCP_AUTH_ENABLED", "1")
+        monkeypatch.delenv("BIOMCP_API_KEYS", raising=False)
+
+        auth_context, body = server_module._authenticate_scope(
+            {"type": "http", "path": "/mcp", "headers": [], "client": ("127.0.0.1", 5000)}
+        )
+
+        assert auth_context is None
+        assert body is not None
+        assert body["status"] == "unauthorized"
+        assert body["auth"]["oauth_enabled"] is True
+
+    def test_authenticate_scope_accepts_api_key_and_uses_key_specific_limits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("BIOMCP_AUTH_ENABLED", "1")
+        monkeypatch.setenv("BIOMCP_API_KEYS", "primary:test-secret")
+        monkeypatch.setenv("BIOMCP_API_KEY_RATE_LIMIT_REQUESTS", "77")
+        monkeypatch.setenv("BIOMCP_API_KEY_RATE_LIMIT_WINDOW_SECONDS", "30")
+
+        auth_context, body = server_module._authenticate_scope(
+            {
+                "type": "http",
+                "path": "/mcp",
+                "headers": [(b"x-api-key", b"test-secret")],
+                "client": ("127.0.0.1", 5001),
+            }
+        )
+
+        assert body is None
+        assert auth_context is not None
+        assert auth_context["mode"] == "api_key"
+        assert auth_context["key_id"] == "primary"
+        assert auth_context["request_limit"] == 77
+        assert auth_context["window_seconds"] == 30
 
 
 class TestServerBranding:
