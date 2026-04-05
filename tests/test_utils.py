@@ -6,11 +6,13 @@ Covers BioValidator, TTLCache, RateLimiter, and make_cache_key.
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 import biomcp.utils as utils
-from biomcp.utils import BioValidator, get_cache, make_cache_key
-
+from biomcp.utils import CACHE_TTLS, BioValidator, get_cache, make_cache_key
 
 # ── BioValidator ─────────────────────────────────────────────────────────────
 
@@ -109,6 +111,22 @@ class TestCache:
         cache1 = get_cache("pubmed")
         cache2 = get_cache("pubmed")
         assert cache1 is cache2
+
+    def test_all_cached_namespaces_have_explicit_ttls(self):
+        used_namespaces: set[str] = set()
+        pattern = re.compile(r'@cached\("([^"]+)"\)')
+        for path in Path("src/biomcp").rglob("*.py"):
+            used_namespaces.update(pattern.findall(path.read_text(encoding="utf-8")))
+
+        missing = sorted(namespace for namespace in used_namespaces if namespace not in CACHE_TTLS)
+        assert missing == []
+
+    def test_cache_ttl_anchors_for_reviewed_sources(self):
+        assert CACHE_TTLS["fda"] == 3_600
+        assert CACHE_TTLS["clinical_trials"] == 1_800
+        assert CACHE_TTLS["variant"] == 86_400
+        assert CACHE_TTLS["gtex"] == 604_800
+        assert CACHE_TTLS["tcga"] == 604_800
 
 
 @pytest.mark.asyncio

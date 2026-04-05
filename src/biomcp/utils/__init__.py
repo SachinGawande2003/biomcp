@@ -140,6 +140,30 @@ CACHE_TTLS: dict[str, int] = {
     "drug_target": 3_600,  # 1 h
     "blast": 1_800,  # 30 m
     "reactome": 43_200,  # 12 h
+    "fda": 3_600,  # 1 h â€” FAERS / labels update frequently enough to stay short
+    "omim": 86_400,  # 24 h â€” curated disease annotations
+    "string": 43_200,  # 12 h â€” interaction network metadata is moderately stable
+    "gtex": 604_800,  # 7 d â€” release-backed reference expression data
+    "cbio": 21_600,  # 6 h â€” portal-backed cancer cohorts may refresh intra-day
+    "gwas": 86_400,  # 24 h â€” catalog updates are not session-sensitive
+    "disgenet": 86_400,  # 24 h â€” curated gene-disease associations
+    "pharmgkb": 86_400,  # 24 h â€” pharmacogenomics annotations
+    "crispr": 86_400,  # 24 h â€” design inputs are mostly stable genomic references
+    "multi_omics": 1_800,  # 30 m â€” aggregate report includes clinical-trial state
+    "enrichment": 21_600,  # 6 h â€” derived pathway enrichment results
+    "biorxiv": 3_600,  # 1 h â€” preprint search results shift quickly
+    "interpro": 604_800,  # 7 d â€” domain/family annotations are release-oriented
+    "coexpression": 43_200,  # 12 h â€” inferred expression relationships
+    "hotspots": 86_400,  # 24 h â€” cancer hotspot summaries are curated releases
+    "splice": 86_400,  # 24 h â€” splice interpretation benefits from daily refresh
+    "biogrid": 21_600,  # 6 h â€” curated interaction catalog with periodic updates
+    "orphanet": 86_400,  # 24 h â€” rare-disease reference data
+    "tcga": 604_800,  # 7 d â€” legacy genomic cohorts are effectively static
+    "cellmarker": 604_800,  # 7 d â€” cell marker reference compendia are static-ish
+    "encode": 86_400,  # 24 h â€” experiment metadata changes slowly
+    "metabolights": 43_200,  # 12 h â€” study metadata is moderately stable
+    "ucsc": 86_400,  # 24 h â€” genome browser annotations refresh slowly
+    "variant": 86_400,  # 24 h â€” ClinVar freshness dominates mixed variant sources
     "default": 3_600,  # 1 h fallback
 }
 
