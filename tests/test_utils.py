@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -127,6 +128,36 @@ class TestCache:
         assert CACHE_TTLS["variant"] == 86_400
         assert CACHE_TTLS["gtex"] == 604_800
         assert CACHE_TTLS["tcga"] == 604_800
+
+    @pytest.mark.asyncio
+    async def test_cached_decorator_adds_fingerprint_and_status(self):
+        namespace = f"test-cache-{uuid4().hex}"
+
+        @utils.cached(namespace)
+        async def load_value(value: int) -> dict[str, int]:
+            return {"value": value}
+
+        try:
+            first = await load_value(7)
+            second = await load_value(7)
+        finally:
+            utils._CACHES.pop(namespace, None)
+
+        assert first["value"] == 7
+        assert first["_cache"]["status"] == "fresh"
+        assert first["_cache"]["namespace"] == namespace
+        assert first["_cache"]["ttl_s"] == CACHE_TTLS["default"]
+
+        fingerprint = first["_cache"]["fingerprint"]
+        first["value"] = 999
+
+        assert second["value"] == 7
+        assert second["_cache"]["status"] == "cached"
+        assert second["_cache"]["fingerprint"] == fingerprint
+        assert second["_cache"]["cache_key"] == first["_cache"]["cache_key"]
+        assert second["_cache"]["cached_at"] == first["_cache"]["cached_at"]
+        assert second["_cache"]["age_s"] >= 0.0
+        assert second["_cache"]["expires_in_s"] <= CACHE_TTLS["default"]
 
 
 @pytest.mark.asyncio

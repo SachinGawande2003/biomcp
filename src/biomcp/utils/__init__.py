@@ -17,6 +17,7 @@ only need:  from biomcp.utils import cached, rate_limited, BioValidator, ...
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -186,6 +187,40 @@ def make_cache_key(*args: Any, **kwargs: Any) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:20]
 
 
+def _fingerprint_cache_payload(payload: Any) -> str:
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode()).hexdigest()[:20]
+
+
+def _decorate_cached_result(
+    payload: Any,
+    *,
+    namespace: str,
+    cache_key: str,
+    cached_at: float,
+    ttl_s: int,
+    fingerprint: str,
+    status: str,
+) -> Any:
+    response = copy.deepcopy(payload)
+    if not isinstance(response, dict):
+        return response
+
+    age_s = max(time.time() - cached_at, 0.0)
+    response["_cache"] = {
+        "namespace": namespace,
+        "cache_key": cache_key,
+        "fingerprint": fingerprint,
+        "status": status,
+        "cached_at": round(cached_at, 3),
+        "age_s": round(age_s, 3),
+        "ttl_s": ttl_s,
+        "expires_in_s": round(max(ttl_s - age_s, 0.0), 3),
+        "is_stale": age_s >= ttl_s,
+    }
+    return response
+
+
 def cached(namespace: str, maxsize: int | None = None) -> Callable[[F], F]:
     """
     Decorator — cache async function results in a named TTL cache.
@@ -197,17 +232,43 @@ def cached(namespace: str, maxsize: int | None = None) -> Callable[[F], F]:
 
     def decorator(func: F) -> F:
         cache = get_cache(namespace, maxsize)
+        ttl_s = CACHE_TTLS.get(namespace, CACHE_TTLS["default"])
 
         @wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             key = make_cache_key(*args, **kwargs)
             if key in cache:
                 logger.debug(f"[cache HIT] {namespace}:{key[:8]}")
-                return cache[key]
+                entry = cache[key]
+                if isinstance(entry, dict) and "payload" in entry:
+                    return _decorate_cached_result(
+                        entry["payload"],
+                        namespace=namespace,
+                        cache_key=key,
+                        cached_at=float(entry["cached_at"]),
+                        ttl_s=ttl_s,
+                        fingerprint=str(entry["fingerprint"]),
+                        status="cached",
+                    )
+                return copy.deepcopy(entry)
             result = await func(*args, **kwargs)
-            cache[key] = result
+            cached_at = time.time()
+            entry = {
+                "payload": copy.deepcopy(result),
+                "cached_at": cached_at,
+                "fingerprint": _fingerprint_cache_payload(result),
+            }
+            cache[key] = entry
             logger.debug(f"[cache SET] {namespace}:{key[:8]}")
-            return result
+            return _decorate_cached_result(
+                result,
+                namespace=namespace,
+                cache_key=key,
+                cached_at=cached_at,
+                ttl_s=ttl_s,
+                fingerprint=str(entry["fingerprint"]),
+                status="fresh",
+            )
 
         return wrapper  # type: ignore[return-value]
 

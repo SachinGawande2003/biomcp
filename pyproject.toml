@@ -2,6 +2,11 @@
 requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+include = [
+    "src/biomcp/core/plan_registry.yaml",
+]
+
 [project]
 name = "biomcp"
 version = "2.3.0"
@@ -47,6 +52,7 @@ dependencies = [
     "xmltodict>=0.13.0",
     "anyio>=4.3.0",
     "orjson>=3.10.0",
+    "PyYAML>=6.0",
     "starlette>=0.40.0",
     "uvicorn>=0.30.0",
 ]

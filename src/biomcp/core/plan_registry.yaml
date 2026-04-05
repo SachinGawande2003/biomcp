@@ -1,0 +1,279 @@
+{
+  "workflows": {
+    "drug_target": {
+      "strategy_template": "Drug target analysis pipeline for ${gene}",
+      "nodes": [
+        {
+          "key": "gene_info",
+          "tool": "get_gene_info",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Establish genomic context for the target"
+        },
+        {
+          "key": "pubmed",
+          "tool": "search_pubmed",
+          "args": { "query": "${gene} drug target inhibitor", "max_results": 8 },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Survey current drug discovery literature"
+        },
+        {
+          "key": "drug_targets",
+          "tool": "get_drug_targets",
+          "args": { "gene_symbol": "${gene}", "max_results": 20 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Identify known compounds and IC50 values"
+        },
+        {
+          "key": "disease_associations",
+          "tool": "get_gene_disease_associations",
+          "args": { "gene_symbol": "${gene}", "max_results": 10 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Understand disease relevance"
+        },
+        {
+          "key": "reactome",
+          "tool": "get_reactome_pathways",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Identify pathway context for target"
+        },
+        {
+          "key": "clinical_trials",
+          "tool": "search_clinical_trials",
+          "args": { "query": "${gene}", "max_results": 10 },
+          "depends_on": ["drug_targets", "disease_associations"],
+          "optional": false,
+          "rationale": "Find active trials for target-directed therapies"
+        },
+        {
+          "key": "gene_variants",
+          "tool": "get_gene_variants",
+          "args": { "gene_symbol": "${gene}", "max_results": 15 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Identify clinically relevant mutations",
+          "include_if": { "depth_in": ["standard", "deep"] }
+        },
+        {
+          "key": "expression",
+          "tool": "search_gene_expression",
+          "args": { "gene_symbol": "${gene}", "max_results": 5 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Tissue-specific expression context",
+          "include_if": { "depth_in": ["standard", "deep"] }
+        },
+        {
+          "key": "multi_omics",
+          "tool": "multi_omics_gene_report",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": ["gene_info", "pubmed"],
+          "optional": true,
+          "rationale": "Comprehensive multi-omics integration",
+          "include_if": { "depth_in": ["deep"] }
+        }
+      ]
+    },
+    "general_gene": {
+      "strategy_template": "Comprehensive gene analysis pipeline for ${gene}",
+      "nodes": [
+        {
+          "key": "gene_info",
+          "tool": "get_gene_info",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Establish genomic context for the gene"
+        },
+        {
+          "key": "pubmed",
+          "tool": "search_pubmed",
+          "args": { "query": "${gene} drug target inhibitor", "max_results": 8 },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Survey current literature around the gene"
+        },
+        {
+          "key": "drug_targets",
+          "tool": "get_drug_targets",
+          "args": { "gene_symbol": "${gene}", "max_results": 20 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Identify therapeutic tractability"
+        },
+        {
+          "key": "disease_associations",
+          "tool": "get_gene_disease_associations",
+          "args": { "gene_symbol": "${gene}", "max_results": 10 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Anchor the gene in disease biology"
+        },
+        {
+          "key": "reactome",
+          "tool": "get_reactome_pathways",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Identify pathway context"
+        },
+        {
+          "key": "clinical_trials",
+          "tool": "search_clinical_trials",
+          "args": { "query": "${gene}", "max_results": 10 },
+          "depends_on": ["drug_targets", "disease_associations"],
+          "optional": false,
+          "rationale": "Find translational follow-through"
+        },
+        {
+          "key": "gene_variants",
+          "tool": "get_gene_variants",
+          "args": { "gene_symbol": "${gene}", "max_results": 15 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Identify clinically relevant mutations",
+          "include_if": { "depth_in": ["standard", "deep"] }
+        },
+        {
+          "key": "expression",
+          "tool": "search_gene_expression",
+          "args": { "gene_symbol": "${gene}", "max_results": 5 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Tissue-specific expression context",
+          "include_if": { "depth_in": ["standard", "deep"] }
+        },
+        {
+          "key": "multi_omics",
+          "tool": "multi_omics_gene_report",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": ["gene_info", "pubmed"],
+          "optional": true,
+          "rationale": "Comprehensive multi-omics integration",
+          "include_if": { "depth_in": ["deep"] }
+        }
+      ]
+    },
+    "disease_genomics": {
+      "strategy_template": "Disease genomics pipeline for ${gene}",
+      "nodes": [
+        {
+          "key": "pubmed",
+          "tool": "search_pubmed",
+          "args": {
+            "query": "${disease_or_goal} ${gene} genomics mechanism",
+            "max_results": 8
+          },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Literature overview"
+        },
+        {
+          "key": "gene_info",
+          "tool": "get_gene_info",
+          "args": { "gene_symbol": "${gene}" },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Gene context"
+        },
+        {
+          "key": "gene_variants",
+          "tool": "get_gene_variants",
+          "args": {
+            "gene_symbol": "${gene}",
+            "consequence_type": "all",
+            "max_results": 25
+          },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Mutation landscape"
+        },
+        {
+          "key": "disease_associations",
+          "tool": "get_gene_disease_associations",
+          "args": { "gene_symbol": "${gene}", "max_results": 10 },
+          "depends_on": ["gene_info"],
+          "optional": false,
+          "rationale": "Evidence-based disease links"
+        },
+        {
+          "key": "clinical_trials",
+          "tool": "search_clinical_trials",
+          "args": { "query": "${disease_or_goal} ${gene}", "max_results": 8 },
+          "depends_on": ["gene_variants", "disease_associations"],
+          "optional": false,
+          "rationale": "Clinical translation status"
+        }
+      ]
+    },
+    "protein_structure": {
+      "strategy_template": "Protein structure analysis pipeline for ${uniprot}",
+      "nodes": [
+        {
+          "key": "protein_info",
+          "tool": "get_protein_info",
+          "args": { "accession": "${uniprot}" },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Full protein annotation"
+        },
+        {
+          "key": "alphafold",
+          "tool": "get_alphafold_structure",
+          "args": { "uniprot_accession": "${uniprot}" },
+          "depends_on": ["protein_info"],
+          "optional": false,
+          "rationale": "Predicted structure confidence"
+        },
+        {
+          "key": "pdb",
+          "tool": "search_pdb_structures",
+          "args": { "query": "${uniprot}", "max_results": 5 },
+          "depends_on": ["protein_info"],
+          "optional": false,
+          "rationale": "Experimental structures"
+        },
+        {
+          "key": "boltz2",
+          "tool": "predict_structure_boltz2",
+          "args": {
+            "protein_sequences": ["__from__:get_protein_info:sequence"],
+            "ligand_smiles": ["${ligand}"],
+            "predict_affinity": true
+          },
+          "depends_on": ["protein_info"],
+          "optional": true,
+          "rationale": "AI structure and binding affinity",
+          "include_if": { "entity_present": ["ligand"] }
+        }
+      ]
+    },
+    "literature_fallback": {
+      "strategy_template": "Literature-driven research pipeline",
+      "nodes": [
+        {
+          "key": "pubmed",
+          "tool": "search_pubmed",
+          "args": { "query": "${goal}", "max_results": 10 },
+          "depends_on": [],
+          "optional": false,
+          "rationale": "Primary literature survey"
+        },
+        {
+          "key": "hypothesis",
+          "tool": "generate_research_hypothesis",
+          "args": { "topic": "${goal}", "max_hypotheses": 3 },
+          "depends_on": ["pubmed"],
+          "optional": false,
+          "rationale": "Hypothesis generation from literature"
+        }
+      ]
+    }
+  }
+}
