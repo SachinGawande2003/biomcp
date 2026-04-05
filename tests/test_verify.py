@@ -53,3 +53,83 @@ async def test_verify_biological_claim_parses_pubmed_sentiment():
     assert any(item["source"] == "UniProt Swiss-Prot" for item in result["supporting_evidence"])
     assert any(item["source"] == "Open Targets" for item in result["supporting_evidence"])
     assert result["contradicting_evidence"][0]["source"] == "PubMed"
+
+
+def test_synthesize_conflicting_evidence_explains_activity_spread():
+    from biomcp.tools.verify import synthesize_conflicting_evidence
+
+    synthesis = synthesize_conflicting_evidence([
+        {
+            "molecule_name": "Osimertinib",
+            "activity_type": "IC50",
+            "activity_value": 0.8,
+            "activity_units": "nM",
+            "activity_relation": "=",
+            "assay_type": "B",
+            "document_year": 2018,
+        },
+        {
+            "molecule_name": "Osimertinib",
+            "activity_type": "IC50",
+            "activity_value": 1250.0,
+            "activity_units": "nM",
+            "activity_relation": ">",
+            "assay_type": "F",
+            "document_year": 2023,
+        },
+    ])
+
+    assert "assay context" in synthesis["summary"].lower()
+    assert any("assay modality differs" in cause.lower() for cause in synthesis["likely_causes"])
+    assert any(step["dimension"] == "concentration_range" for step in synthesis["reasoning_steps"])
+    assert synthesis["confidence"] in {"moderate", "high"}
+
+
+@pytest.mark.asyncio
+async def test_detect_database_conflicts_includes_synthesized_reasoning():
+    ncbi_result = {"full_name": "epidermal growth factor receptor"}
+    uniprot_result = {"proteins": [{"name": "epidermal growth factor receptor", "genes": ["EGFR"]}]}
+    chembl_result = {
+        "drugs": [
+            {
+                "molecule_name": "Osimertinib",
+                "activity_type": "IC50",
+                "activity_value": 0.8,
+                "activity_units": "nM",
+                "activity_relation": "=",
+                "assay_type": "B",
+                "document_year": 2018,
+            },
+            {
+                "molecule_name": "Osimertinib",
+                "activity_type": "IC50",
+                "activity_value": 1250.0,
+                "activity_units": "nM",
+                "activity_relation": ">",
+                "assay_type": "F",
+                "document_year": 2023,
+            },
+        ]
+    }
+    association_result = {"associations": []}
+
+    with (
+        patch("biomcp.tools.ncbi.get_gene_info", new=AsyncMock(return_value=ncbi_result)),
+        patch("biomcp.tools.proteins.search_proteins", new=AsyncMock(return_value=uniprot_result)),
+        patch("biomcp.tools.pathways.get_drug_targets", new=AsyncMock(return_value=chembl_result)),
+        patch(
+            "biomcp.tools.pathways.get_gene_disease_associations",
+            new=AsyncMock(return_value=association_result),
+        ),
+    ):
+        from biomcp.tools.verify import detect_database_conflicts
+
+        result = await detect_database_conflicts("EGFR")
+
+    assert result["conflicts_found"] == 1
+    conflict = result["conflicts"][0]
+    assert conflict["type"] == "ACTIVITY_VALUE_DISCREPANCY"
+    assert "synthesis" in conflict
+    assert "assay context" in conflict["synthesis"]["summary"].lower()
+    assert any(step["dimension"] == "activity_relation" for step in conflict["synthesis"]["reasoning_steps"])
+    assert result["conflict_synthesis"][0]["type"] == "ACTIVITY_VALUE_DISCREPANCY"

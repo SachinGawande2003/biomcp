@@ -377,6 +377,69 @@ class TestDispatchInitialization:
         assert server_module._DISPATCH_TABLE is stub_table
 
 
+class TestStartupCacheWarming:
+    @pytest.mark.asyncio
+    async def test_warm_common_gene_caches_collects_failures(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        calls: list[tuple[str, str]] = []
+
+        async def _ok(gene: str):
+            calls.append(("ok", gene))
+            return {"gene": gene}
+
+        async def _fail(gene: str):
+            calls.append(("fail", gene))
+            raise RuntimeError(f"boom:{gene}")
+
+        monkeypatch.setattr(
+            server_module,
+            "_build_cache_warmers",
+            lambda: [("ok", _ok), ("fail", _fail)],
+        )
+        monkeypatch.setenv("BIOMCP_CACHE_WARM_CONCURRENCY", "2")
+
+        result = await server_module._warm_common_gene_caches(["TP53", "EGFR"])
+
+        assert result["warming_summary"]["total_calls"] == 4
+        assert result["warming_summary"]["successful_calls"] == 2
+        assert result["warming_summary"]["failed_calls"] == 2
+        assert len(result["failed"]) == 2
+        assert {entry["gene"] for entry in result["failed"]} == {"TP53", "EGFR"}
+        assert ("ok", "TP53") in calls
+        assert ("fail", "EGFR") in calls
+
+    @pytest.mark.asyncio
+    async def test_start_cache_warmer_respects_env_flag(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("BIOMCP_CACHE_WARMING", "0")
+        task = server_module._start_cache_warmer("http")
+        assert task is None
+
+    @pytest.mark.asyncio
+    async def test_start_cache_warmer_schedules_background_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        seen: list[list[str]] = []
+
+        async def _fake_warm(genes: list[str]):
+            seen.append(list(genes))
+            return {"warming_summary": {"total_calls": len(genes)}}
+
+        monkeypatch.setenv("BIOMCP_CACHE_WARMING", "1")
+        monkeypatch.setattr(server_module, "_cache_warm_gene_panel", lambda: ["TP53", "EGFR"])
+        monkeypatch.setattr(server_module, "_warm_common_gene_caches", _fake_warm)
+
+        task = server_module._start_cache_warmer("http")
+        assert task is not None
+        await task
+        assert seen == [["TP53", "EGFR"]]
+
+
 class TestStreamingProgress:
     @pytest.mark.asyncio
     async def test_multi_omics_dispatch_streams_progress_notifications(

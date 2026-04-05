@@ -19,6 +19,210 @@ from biomcp.utils import (
     BioValidator,
 )
 
+_CHEMBL_ASSAY_TYPE_LABELS = {
+    "A": "ADMET assay",
+    "B": "binding assay",
+    "F": "functional assay",
+    "P": "physicochemical assay",
+    "T": "toxicity assay",
+    "U": "unclassified assay",
+}
+
+
+def _describe_assay_type(assay_type: str) -> str:
+    if not assay_type:
+        return "unspecified assay"
+    return _CHEMBL_ASSAY_TYPE_LABELS.get(assay_type.upper(), assay_type)
+
+
+def synthesize_conflicting_evidence(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Explain why multiple records disagree rather than only flagging a discrepancy.
+
+    The function accepts a list of structured result fragments for a single conflict.
+    It returns a compact reasoning payload that can be attached to conflict reports.
+    """
+    if not tool_results:
+        return {
+            "summary": "No evidence records were provided for synthesis.",
+            "likely_causes": [],
+            "reasoning_steps": [],
+            "confidence": "low",
+        }
+
+    if all("activity_value" in result for result in tool_results):
+        numeric_values: list[float] = []
+        for result in tool_results:
+            try:
+                value = float(result.get("activity_value", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                numeric_values.append(value)
+        assay_types = sorted({
+            _describe_assay_type(str(result.get("assay_type", "")))
+            for result in tool_results
+            if result.get("assay_type")
+        })
+        activity_types = sorted({
+            str(result.get("activity_type", "IC50"))
+            for result in tool_results
+            if result.get("activity_type")
+        })
+        relations = sorted({
+            str(result.get("activity_relation", ""))
+            for result in tool_results
+            if result.get("activity_relation")
+        })
+        units = sorted({
+            str(result.get("activity_units", ""))
+            for result in tool_results
+            if result.get("activity_units")
+        })
+        years = sorted({
+            int(result.get("document_year"))
+            for result in tool_results
+            if str(result.get("document_year", "")).isdigit()
+        })
+
+        value_min = min(numeric_values) if numeric_values else 0.0
+        value_max = max(numeric_values) if numeric_values else 0.0
+        ratio = value_max / max(value_min, 1e-9) if numeric_values else 1.0
+        likely_causes: list[str] = []
+        reasoning_steps: list[dict[str, str]] = []
+
+        if assay_types:
+            reasoning_steps.append({
+                "dimension": "assay_type",
+                "observation": ", ".join(assay_types),
+                "implication": (
+                    "Different assay modalities often produce materially different potency values."
+                    if len(assay_types) > 1
+                    else "All records share the same assay modality, so other factors likely drive the spread."
+                ),
+            })
+            if len(assay_types) > 1:
+                likely_causes.append(
+                    f"Assay modality differs across records ({', '.join(assay_types)})."
+                )
+
+        if numeric_values:
+            range_units = units[0] if len(units) == 1 else "mixed units"
+            reasoning_steps.append({
+                "dimension": "concentration_range",
+                "observation": f"{value_min:g} to {value_max:g} {range_units}",
+                "implication": (
+                    f"Potency spans roughly {ratio:.0f}x, which is large enough to reflect context-specific assay behavior."
+                    if ratio >= 100
+                    else "Potency spread is present but modest."
+                ),
+            })
+            if ratio >= 100:
+                likely_causes.append(
+                    f"Reported {activity_types[0] if activity_types else 'activity'} values span roughly {ratio:.0f}x."
+                )
+
+        if relations:
+            reasoning_steps.append({
+                "dimension": "activity_relation",
+                "observation": ", ".join(relations),
+                "implication": (
+                    "Some results are bounded ('>' or '<') rather than exact measurements."
+                    if any(rel in relations for rel in (">", "<", ">=", "<="))
+                    else "Measurements are exact comparisons."
+                ),
+            })
+            if any(rel in relations for rel in (">", "<", ">=", "<=")):
+                likely_causes.append(
+                    "At least one potency value is a bound rather than an exact endpoint."
+                )
+
+        if years:
+            reasoning_steps.append({
+                "dimension": "study_vintage",
+                "observation": ", ".join(str(year) for year in years),
+                "implication": (
+                    "Protocol drift over time can change assay sensitivity and reported potency."
+                    if len(years) > 1
+                    else "All records come from the same study vintage."
+                ),
+            })
+            if len(years) > 1:
+                likely_causes.append("Measurements come from different publication years and likely different protocols.")
+
+        likely_causes.append(
+            "Cell-line context is not exposed in the current cached ChEMBL summary; inspect raw assay records if you need per-cell-line attribution."
+        )
+
+        confidence = "high" if len(reasoning_steps) >= 3 else "moderate"
+        return {
+            "summary": (
+                f"Conflicting potency values are most likely driven by assay context rather than a true contradiction. "
+                f"The records cover {len(tool_results)} assay measurements"
+                + (f" across {len(assay_types)} assay modalities." if assay_types else ".")
+            ),
+            "likely_causes": likely_causes,
+            "reasoning_steps": reasoning_steps,
+            "confidence": confidence,
+        }
+
+    record_type = str(tool_results[0].get("record_type", "generic"))
+    if record_type == "name_alignment":
+        values = [
+            f"{item.get('source', 'source')}: {item.get('value', '')}"
+            for item in tool_results
+            if item.get("value")
+        ]
+        return {
+            "summary": "Gene and protein resources often prefer different naming conventions and curation labels.",
+            "likely_causes": [
+                "NCBI and UniProt may emphasize different synonyms or full-name conventions.",
+                "This usually reflects nomenclature drift rather than a biological contradiction.",
+            ],
+            "reasoning_steps": [
+                {
+                    "dimension": "source_labels",
+                    "observation": "; ".join(values),
+                    "implication": "Cross-check HGNC-approved names to normalize the label set.",
+                }
+            ],
+            "confidence": "moderate",
+        }
+
+    if record_type == "evidence_asymmetry":
+        genetics = next((item for item in tool_results if item.get("channel") == "genetic_association"), {})
+        drugs = next((item for item in tool_results if item.get("channel") == "known_drug"), {})
+        return {
+            "summary": "This is more likely a translational gap than a contradiction: genetics supports the target, but drug evidence lags.",
+            "likely_causes": [
+                "Human genetic evidence can accumulate before tractable compounds or approved drugs exist.",
+                "The target may be biologically validated but still hard to drug.",
+            ],
+            "reasoning_steps": [
+                {
+                    "dimension": "genetic_association",
+                    "observation": str(genetics.get("score", "")),
+                    "implication": "Strong human genetics increases confidence that the disease link is real.",
+                },
+                {
+                    "dimension": "known_drug",
+                    "observation": str(drugs.get("score", "")),
+                    "implication": "Weak drug evidence points to a therapeutic-development gap, not necessarily conflicting biology.",
+                },
+            ],
+            "confidence": "moderate",
+        }
+
+    return {
+        "summary": "The records disagree, but the current metadata is too thin to attribute the discrepancy precisely.",
+        "likely_causes": [
+            "Source-specific curation choices may differ.",
+            "Additional assay-level metadata is required to explain the discrepancy confidently.",
+        ],
+        "reasoning_steps": [],
+        "confidence": "low",
+    }
+
 
 async def verify_biological_claim(
     claim: str,
@@ -248,7 +452,7 @@ async def detect_database_conflicts(
 
     # Conflict 1: ChEMBL activity value consistency
     if isinstance(chembl_result, dict) and "drugs" in chembl_result:
-        activity_values: dict[str, list[float]] = {}
+        activity_values: dict[str, list[dict[str, Any]]] = {}
         for drug in chembl_result["drugs"]:
             try:
                 mol_name = drug.get("molecule_name") or drug.get("molecule_chembl_id", "")
@@ -256,14 +460,24 @@ async def detect_database_conflicts(
                 val = float(drug.get("activity_value", 0) or 0)
                 if val > 0:
                     key = f"{mol_name}:{act_type}"
-                    activity_values.setdefault(key, []).append(val)
+                    activity_values.setdefault(key, []).append({
+                        "molecule_name": mol_name,
+                        "activity_type": act_type,
+                        "activity_value": val,
+                        "activity_units": drug.get("activity_units", ""),
+                        "activity_relation": drug.get("activity_relation", ""),
+                        "assay_type": drug.get("assay_type", ""),
+                        "document_year": drug.get("document_year", ""),
+                    })
             except (ValueError, TypeError):
                 pass
 
-        for key, values in activity_values.items():
-            if len(values) >= 2:
+        for key, observations in activity_values.items():
+            if len(observations) >= 2:
+                values = [item["activity_value"] for item in observations]
                 ratio = max(values) / max(min(values), 1e-9)
                 if ratio > 100:
+                    synthesis = synthesize_conflicting_evidence(observations)
                     conflicts.append({
                         "type":           "ACTIVITY_VALUE_DISCREPANCY",
                         "severity":       "HIGH",
@@ -272,6 +486,8 @@ async def detect_database_conflicts(
                         "entity":         key.split(":")[0],
                         "detail":         f"IC50 values differ by {ratio:.0f}x across assays",
                         "values":         values,
+                        "assay_observations": observations[:5],
+                        "synthesis":      synthesis,
                         "recommendation": "Check assay conditions — in vitro vs cell-based assays differ.",
                     })
 
@@ -284,12 +500,17 @@ async def detect_database_conflicts(
         ncbi_words    = set(ncbi_name.lower().split()) - {"the","a","an","of","and","or"}
         uniprot_words = set(uniprot_name.lower().split()) - {"the","a","an","of","and","or"}
         if len(ncbi_words & uniprot_words) == 0 and len(ncbi_words) > 2:
+            synthesis = synthesize_conflicting_evidence([
+                {"record_type": "name_alignment", "source": "NCBI Gene", "value": ncbi_name},
+                {"record_type": "name_alignment", "source": "UniProt", "value": uniprot_name},
+            ])
             conflicts.append({
                 "type":           "GENE_NAME_MISMATCH",
                 "severity":       "LOW",
                 "source_a":       "NCBI Gene",
                 "source_b":       "UniProt",
                 "detail":         f"NCBI: '{ncbi_name}' vs UniProt: '{uniprot_name}'",
+                "synthesis":      synthesis,
                 "recommendation": "Cross-reference HGNC for authoritative gene name.",
             })
 
@@ -301,6 +522,10 @@ async def detect_database_conflicts(
                 genetic = float(scores.get("genetic_association", 0) or 0)
                 drug    = float(scores.get("known_drug", 0) or 0)
                 if genetic > 0.7 and drug < 0.1:
+                    synthesis = synthesize_conflicting_evidence([
+                        {"record_type": "evidence_asymmetry", "channel": "genetic_association", "score": genetic},
+                        {"record_type": "evidence_asymmetry", "channel": "known_drug", "score": drug},
+                    ])
                     conflicts.append({
                         "type":           "EVIDENCE_TYPE_ASYMMETRY",
                         "severity":       "MEDIUM",
@@ -308,6 +533,7 @@ async def detect_database_conflicts(
                         "source_b":       "Open Targets (drugs)",
                         "entity":         assoc.get("disease_name", ""),
                         "detail":         f"Strong genetic (score:{genetic:.2f}) but no approved drugs (score:{drug:.2f})",
+                        "synthesis":      synthesis,
                         "recommendation": "Potential unmet therapeutic need — investigate druggability.",
                     })
             except (TypeError, ValueError):
@@ -347,4 +573,13 @@ async def detect_database_conflicts(
             "chembl_compounds": len(chembl_result.get("drugs", [])) if isinstance(chembl_result, dict) else 0,
             "ot_associations":  len(ot_result.get("associations", [])) if isinstance(ot_result, dict) else 0,
         },
+        "conflict_synthesis": [
+            {
+                "type": conflict["type"],
+                "entity": conflict.get("entity", gene_symbol),
+                "summary": conflict.get("synthesis", {}).get("summary", ""),
+                "likely_causes": conflict.get("synthesis", {}).get("likely_causes", []),
+            }
+            for conflict in conflicts
+        ],
     }

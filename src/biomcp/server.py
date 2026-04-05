@@ -25,7 +25,14 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 
 from biomcp import __version__
-from biomcp.utils import close_http_client, format_error, format_success, get_cache, make_cache_key
+from biomcp.utils import (
+    BioValidator,
+    close_http_client,
+    format_error,
+    format_success,
+    get_cache,
+    make_cache_key,
+)
 
 # FIX #1: Removed duplicate import line that was here
 
@@ -36,6 +43,28 @@ SSE_PATH = "/sse"
 MESSAGE_PATH = "/messages/"
 DEFAULT_SERVER_WEBSITE_URL = "https://heuris-biomcp.onrender.com"
 LOGO_ROUTE_PATH = "/logo.jpeg"
+_DEFAULT_CACHE_WARM_GENES = [
+    "TP53",
+    "EGFR",
+    "KRAS",
+    "BRCA1",
+    "BRCA2",
+    "PIK3CA",
+    "PTEN",
+    "MYC",
+    "ALK",
+    "MET",
+    "BRAF",
+    "ERBB2",
+    "CDKN2A",
+    "APC",
+    "NRAS",
+    "KIT",
+    "ATM",
+    "JAK2",
+    "ESR1",
+    "AR",
+]
 
 _DISPATCH_TABLE: dict[str, Callable[..., Any]] | None = None
 _TOOL_MODULES: dict[str, Any] | None = None
@@ -2429,6 +2458,170 @@ async def _dispatch(name: str, args: dict[str, Any]) -> str:
         return format_error(name, exc, {"arguments": args})
 
 
+def _cache_warming_enabled(transport_mode: str) -> bool:
+    flag = os.getenv("BIOMCP_CACHE_WARMING", "auto").strip().lower()
+    if flag in {"0", "false", "off", "disabled"}:
+        return False
+    if flag in {"1", "true", "on", "enabled"}:
+        return True
+    return transport_mode == "http"
+
+
+def _cache_warm_gene_panel() -> list[str]:
+    configured = os.getenv("BIOMCP_CACHE_WARM_GENES", "").strip()
+    raw_genes = configured.split(",") if configured else list(_DEFAULT_CACHE_WARM_GENES)
+    genes: list[str] = []
+    for raw_gene in raw_genes:
+        token = raw_gene.strip()
+        if not token:
+            continue
+        try:
+            normalized = BioValidator.validate_gene_symbol(token)
+        except ValueError:
+            logger.warning(f"Skipping invalid cache warm gene '{token}'")
+            continue
+        if normalized not in genes:
+            genes.append(normalized)
+
+    try:
+        limit = int(os.getenv("BIOMCP_CACHE_WARM_GENE_LIMIT", str(len(_DEFAULT_CACHE_WARM_GENES))))
+    except ValueError:
+        limit = len(_DEFAULT_CACHE_WARM_GENES)
+    return genes[: max(1, limit)]
+
+
+def _build_cache_warmers() -> list[tuple[str, Callable[[str], Awaitable[Any]]]]:
+    from biomcp.tools.advanced import get_gene_variants, search_gene_expression
+    from biomcp.tools.databases import (
+        get_disgenet_associations,
+        get_gtex_expression,
+        get_omim_gene_diseases,
+        get_pharmgkb_variants,
+        get_string_interactions,
+        search_cbio_mutations,
+        search_gwas_catalog,
+    )
+    from biomcp.tools.extended_databases import (
+        get_biogrid_interactions,
+        get_encode_regulatory,
+        get_tcga_expression,
+        get_ucsc_splice_variants,
+        search_cellmarker,
+    )
+    from biomcp.tools.ncbi import get_gene_info
+    from biomcp.tools.pathways import (
+        get_drug_targets,
+        get_gene_disease_associations,
+        get_kegg_gene_pathways,
+        get_reactome_pathways,
+    )
+    from biomcp.tools.proteins import search_proteins
+
+    return [
+        ("ncbi:get_gene_info", lambda gene: get_gene_info(gene)),
+        ("proteins:search_proteins", lambda gene: search_proteins(gene, max_results=1, reviewed_only=True)),
+        ("pathways:get_kegg_gene_pathways", lambda gene: get_kegg_gene_pathways(gene)),
+        ("pathways:get_reactome_pathways", lambda gene: get_reactome_pathways(gene)),
+        ("pathways:get_drug_targets", lambda gene: get_drug_targets(gene, max_results=5)),
+        ("pathways:get_gene_disease_associations", lambda gene: get_gene_disease_associations(gene, max_results=5)),
+        ("advanced:get_gene_variants", lambda gene: get_gene_variants(gene, max_results=5)),
+        ("advanced:search_gene_expression", lambda gene: search_gene_expression(gene, max_datasets=3)),
+        ("databases:get_omim_gene_diseases", lambda gene: get_omim_gene_diseases(gene)),
+        ("databases:get_string_interactions", lambda gene: get_string_interactions(gene, max_results=5)),
+        ("databases:get_gtex_expression", lambda gene: get_gtex_expression(gene, top_tissues=5)),
+        ("databases:search_cbio_mutations", lambda gene: search_cbio_mutations(gene, max_studies=3)),
+        ("databases:search_gwas_catalog", lambda gene: search_gwas_catalog(gene, max_results=5)),
+        ("databases:get_disgenet_associations", lambda gene: get_disgenet_associations(gene, max_results=5)),
+        ("databases:get_pharmgkb_variants", lambda gene: get_pharmgkb_variants(gene, max_results=5)),
+        ("extended:get_biogrid_interactions", lambda gene: get_biogrid_interactions(gene, max_results=5)),
+        ("extended:get_tcga_expression", lambda gene: get_tcga_expression(gene, max_cases=3)),
+        ("extended:search_cellmarker", lambda gene: search_cellmarker(gene_symbol=gene, max_results=5)),
+        ("extended:get_encode_regulatory", lambda gene: get_encode_regulatory(gene, max_results=5)),
+        ("extended:get_ucsc_splice_variants", lambda gene: get_ucsc_splice_variants(gene)),
+    ]
+
+
+async def _warm_common_gene_caches(genes: list[str] | None = None) -> dict[str, Any]:
+    warm_genes = genes or _cache_warm_gene_panel()
+    if not warm_genes:
+        return {
+            "genes": [],
+            "warming_summary": {
+                "total_calls": 0,
+                "successful_calls": 0,
+                "failed_calls": 0,
+                "warmer_count": 0,
+            },
+            "failed": [],
+        }
+
+    try:
+        max_concurrency = int(os.getenv("BIOMCP_CACHE_WARM_CONCURRENCY", "4"))
+    except ValueError:
+        max_concurrency = 4
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
+    warmers = _build_cache_warmers()
+    logger.info(
+        f"Scheduling cache warming for {len(warm_genes)} genes across {len(warmers)} warmers"
+    )
+
+    async def _invoke(gene: str, warmer_name: str, warmer: Callable[[str], Awaitable[Any]]) -> dict[str, str]:
+        async with semaphore:
+            try:
+                await warmer(gene)
+                return {"gene": gene, "warmer": warmer_name, "status": "ok"}
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug(f"Cache warm failed for {gene} via {warmer_name}: {exc}")
+                return {"gene": gene, "warmer": warmer_name, "status": "error", "error": str(exc)}
+
+    tasks = [
+        asyncio.create_task(_invoke(gene, warmer_name, warmer))
+        for gene in warm_genes
+        for warmer_name, warmer in warmers
+    ]
+
+    try:
+        outcomes = await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        raise
+
+    failed = [outcome for outcome in outcomes if outcome["status"] != "ok"]
+    summary = {
+        "total_calls": len(outcomes),
+        "successful_calls": len(outcomes) - len(failed),
+        "failed_calls": len(failed),
+        "warmer_count": len(warmers),
+    }
+    logger.info(
+        "Cache warming complete: "
+        f"{summary['successful_calls']}/{summary['total_calls']} calls succeeded "
+        f"across {len(warm_genes)} genes"
+    )
+    return {
+        "genes": warm_genes,
+        "warming_summary": summary,
+        "failed": failed[:20],
+    }
+
+
+def _start_cache_warmer(transport_mode: str) -> asyncio.Task[dict[str, Any]] | None:
+    if not _cache_warming_enabled(transport_mode):
+        logger.info("   Cache warm: disabled")
+        return None
+
+    genes = _cache_warm_gene_panel()
+    if not genes:
+        logger.info("   Cache warm: no valid genes configured")
+        return None
+
+    logger.info(f"   Cache warm: background warming for {len(genes)} genes")
+    return asyncio.create_task(_warm_common_gene_caches(genes), name="biomcp-cache-warmer")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MCP Server — FIX #10: hardened against missing mcp.types.Icon
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2518,93 +2711,98 @@ async def _run() -> None:
     server = create_server()
     transport_mode = os.getenv("BIOMCP_TRANSPORT", "stdio")
     http_port      = int(os.getenv("BIOMCP_HTTP_PORT", "8080"))
+    cache_warm_task = _start_cache_warmer(transport_mode)
 
-    if transport_mode == "http":
-        logger.info(f"   🌐 HTTP mode — port {http_port}")
-        from mcp.server.sse import SseServerTransport
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-        from starlette.applications import Starlette
-        from starlette.middleware.cors import CORSMiddleware
-        from starlette.responses import FileResponse, JSONResponse, Response
-        from starlette.routing import Mount, Route
+    try:
+        if transport_mode == "http":
+            logger.info(f"   🌐 HTTP mode — port {http_port}")
+            from mcp.server.sse import SseServerTransport
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+            from starlette.applications import Starlette
+            from starlette.middleware.cors import CORSMiddleware
+            from starlette.responses import FileResponse, JSONResponse, Response
+            from starlette.routing import Mount, Route
 
-        sse_transport = SseServerTransport(MESSAGE_PATH)
-        streamable_http_manager = StreamableHTTPSessionManager(app=server)
-        streamable_http_app = _StreamableHTTPASGIApp(streamable_http_manager)
+            sse_transport = SseServerTransport(MESSAGE_PATH)
+            streamable_http_manager = StreamableHTTPSessionManager(app=server)
+            streamable_http_app = _StreamableHTTPASGIApp(streamable_http_manager)
 
-        async def handle_sse(request):
-            async with sse_transport.connect_sse(
-                request.scope, request.receive, request._send
-            ) as streams:
-                await server.run(streams[0], streams[1], server.create_initialization_options())
-            return Response()
+            async def handle_sse(request):
+                async with sse_transport.connect_sse(
+                    request.scope, request.receive, request._send
+                ) as streams:
+                    await server.run(streams[0], streams[1], server.create_initialization_options())
+                return Response()
 
-        async def handle_health(request):
-            return JSONResponse(_build_health_report(transport_mode="http"))
+            async def handle_health(request):
+                return JSONResponse(_build_health_report(transport_mode="http"))
 
-        async def handle_readiness(request):
-            payload = _build_readiness_report(transport_mode="http")
-            return JSONResponse(payload, status_code=200 if payload["ready"] else 503)
+            async def handle_readiness(request):
+                payload = _build_readiness_report(transport_mode="http")
+                return JSONResponse(payload, status_code=200 if payload["ready"] else 503)
 
-        async def handle_tool_health(request):
-            return JSONResponse(_build_tool_health_report())
+            async def handle_tool_health(request):
+                return JSONResponse(_build_tool_health_report())
 
-        async def handle_root(request):
-            return JSONResponse(_build_root_report(transport_mode="http"))
+            async def handle_root(request):
+                return JSONResponse(_build_root_report(transport_mode="http"))
 
-        async def handle_streamable_http_head(request):
-            return JSONResponse(
-                {
-                    "service": SERVER_NAME,
-                    "status": "ok",
-                    "transport": "streamable_http",
-                    "endpoint": STREAMABLE_HTTP_PATH,
-                }
+            async def handle_streamable_http_head(request):
+                return JSONResponse(
+                    {
+                        "service": SERVER_NAME,
+                        "status": "ok",
+                        "transport": "streamable_http",
+                        "endpoint": STREAMABLE_HTTP_PATH,
+                    }
+                )
+
+            async def handle_logo(request):
+                logo_path = _resolve_logo_path()
+                if logo_path is None:
+                    return Response(status_code=404)
+                return FileResponse(logo_path, media_type="image/jpeg")
+
+            @contextlib.asynccontextmanager
+            async def lifespan(app: Starlette):
+                async with streamable_http_manager.run():
+                    try:
+                        yield
+                    finally:
+                        await close_http_client()
+
+            app = Starlette(
+                lifespan=lifespan,
+                routes=[
+                    Route(LOGO_ROUTE_PATH, endpoint=handle_logo, methods=["GET"]),
+                    Route("/health", endpoint=handle_health, methods=["GET"]),
+                    Route("/healthz", endpoint=handle_health, methods=["GET"]),
+                    Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
+                    Route("/tool-health", endpoint=handle_tool_health, methods=["GET"]),
+                    Route(SSE_PATH, endpoint=handle_sse, methods=["GET"]),
+                    Route(STREAMABLE_HTTP_PATH, endpoint=handle_streamable_http_head, methods=["HEAD"]),
+                    Route(STREAMABLE_HTTP_PATH, endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
+                    Mount(MESSAGE_PATH, app=sse_transport.handle_post_message),
+                    Route("/", endpoint=handle_root, methods=["GET"]),
+                ],
             )
-
-        async def handle_logo(request):
-            logo_path = _resolve_logo_path()
-            if logo_path is None:
-                return Response(status_code=404)
-            return FileResponse(logo_path, media_type="image/jpeg")
-
-        @contextlib.asynccontextmanager
-        async def lifespan(app: Starlette):
-            async with streamable_http_manager.run():
-                try:
-                    yield
-                finally:
-                    await close_http_client()
-
-        app = Starlette(
-            lifespan=lifespan,
-            routes=[
-                Route(LOGO_ROUTE_PATH, endpoint=handle_logo, methods=["GET"]),
-                Route("/health", endpoint=handle_health, methods=["GET"]),
-                Route("/healthz", endpoint=handle_health, methods=["GET"]),
-                Route("/readyz", endpoint=handle_readiness, methods=["GET"]),
-                Route("/tool-health", endpoint=handle_tool_health, methods=["GET"]),
-                Route(SSE_PATH, endpoint=handle_sse, methods=["GET"]),
-                Route(STREAMABLE_HTTP_PATH, endpoint=handle_streamable_http_head, methods=["HEAD"]),
-                Route(STREAMABLE_HTTP_PATH, endpoint=streamable_http_app, methods=["GET", "POST", "DELETE"]),
-                Mount(MESSAGE_PATH, app=sse_transport.handle_post_message),
-                Route("/", endpoint=handle_root, methods=["GET"]),
-            ],
-        )
-        app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                           allow_methods=["*"], allow_headers=["*"])
-        import uvicorn
-        await uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=http_port)).serve()
-    else:
-        logger.info("   📟 STDIO mode")
-        try:
+            app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                               allow_methods=["*"], allow_headers=["*"])
+            import uvicorn
+            await uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=http_port)).serve()
+        else:
+            logger.info("   📟 STDIO mode")
             async with stdio_server() as (read_stream, write_stream):
                 await server.run(
                     read_stream, write_stream,
                     server.create_initialization_options(),
                 )
-        finally:
-            await close_http_client()
+    finally:
+        if cache_warm_task is not None and not cache_warm_task.done():
+            cache_warm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cache_warm_task
+        await close_http_client()
 
 
 def main() -> None:
